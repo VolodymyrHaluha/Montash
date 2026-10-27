@@ -1,4 +1,4 @@
-package com.volodymyrhaluha.montash.ui.theme
+package com.frop.montash.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

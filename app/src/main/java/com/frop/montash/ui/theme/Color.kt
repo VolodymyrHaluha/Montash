@@ -1,4 +1,4 @@
-package com.volodymyrhaluha.montash.ui.theme
+package com.frop.montash.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.volodymyrhaluha.montash"
+    namespace = "com.frop.montash"
     compileSdk {
         version = release(37) {
             minorApiLevel = 1
@@ -12,7 +12,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.volodymyrhaluha.montash"
+        applicationId = "com.frop.montash"
         minSdk = 24
         targetSdk = 36
         versionCode = 2

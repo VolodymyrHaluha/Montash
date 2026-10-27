@@ -34,6 +34,6 @@
 
 Друга команда потребує підключеного Android-пристрою або емулятора. Debug APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
-Назва: **Montash**. Ідентифікатор: `com.volodymyrhaluha.montash`. Можна встановлювати поруч із Mounter; дані з Mounter автоматично не імпортуються. Namespace, пакети основного коду й тестів — `com.volodymyrhaluha.montash`.
+Назва: **Montash**. Ідентифікатор: `com.frop.montash`. Можна встановлювати поруч із Mounter; дані з Mounter автоматично не імпортуються. Namespace, пакети основного коду й тестів — `com.frop.montash`.
 
 Вихідна версія та звіт: [docs/migration.md](docs/migration.md).
