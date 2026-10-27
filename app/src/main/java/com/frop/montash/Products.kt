@@ -1,4 +1,4 @@
-package com.volodymyrhaluha.montash
+package com.frop.montash
 
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult

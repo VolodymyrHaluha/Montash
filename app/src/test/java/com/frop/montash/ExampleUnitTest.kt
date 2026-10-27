@@ -1,4 +1,4 @@
-package com.volodymyrhaluha.montash
+package com.frop.montash
 
 import org.junit.Test
 

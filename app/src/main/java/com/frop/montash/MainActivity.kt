@@ -1,4 +1,6 @@
-package com.volodymyrhaluha.montash
+package com.frop.montash
+
+import com.frop.montash.R as MontashResources
 
 import android.os.Bundle
 import android.content.Context
@@ -219,7 +221,7 @@ internal fun MontashApp() {
     }
     Box(Modifier.fillMaxSize().background(CanvasColor)) {
         Image(
-            painter = painterResource(R.drawable.frop_logo_preview_01_1),
+            painter = painterResource(MontashResources.drawable.frop_logo_preview_01_1),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.matchParentSize()
