@@ -1,4 +1,4 @@
-package com.volodymyrhaluha.montash
+package com.frop.montash
 
 import android.graphics.Matrix
 import android.graphics.Bitmap

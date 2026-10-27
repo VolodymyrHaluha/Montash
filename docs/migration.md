@@ -46,6 +46,21 @@ APK зібрано з debug-підписом для тестового вста�
 
 ## Самостійний пакет і конфігурація IDE
 
-Namespace, applicationId, пакети Kotlin і тестів, а також шляхи вихідних файлів узгоджені з `com.volodymyrhaluha.montash`. Теми та кореневий компонент називаються MontashTheme/MontashApp; XML-стилі — Theme.Montash.
+Namespace, applicationId, пакети Kotlin і тестів, а також шляхи вихідних файлів узгоджені з `com.frop.montash`. Теми та кореневий компонент називаються MontashTheme/MontashApp; XML-стилі — Theme.Montash.
 
-Прибрані застарілий Java-модуль IDE, його список модулів, машинозалежна прив’язка до JDK 25 і кеш пристроїв. `.idea/gradle.xml` підключає корінь і Android-модуль `app`. `.run/Montash.run.xml` додає Android App конфігурацію Montash для модуля Montash.app.main: Gradle-збірка, встановлення debug APK і запуск launcher activity на вибраному пристрої.
+Прибрані застарілий Java-модуль IDE, його список модулів, машинозалежна прив’язка до JDK 25 і кеш пристроїв. `.idea/gradle.xml` підключає корінь і Android-модуль `app`. `.idea/runConfigurations/app.xml` додає стандартну Android App конфігурацію app для модуля Montash.app.main: Gradle-збірка, встановлення debug APK і запуск launcher activity на вибраному пристрої.
+
+## Імпорт Android-модуля та звичайний запуск app
+
+- `.idea/AndroidProjectSystem.xml` явно вибирає Android Gradle Project System.
+- У `.idea/gradle.xml` підключені корінь і `app`; прибрана прив’язка до локального псевдоніма JDK. JDK 21 налаштовується в Android Studio.
+- Конфігурація `app` зберігається у стандартній папці `.idea/runConfigurations`, посилається на Android main-модуль `Montash.app.main` і запускає Default Activity після Gradle-збірки. Стара конфігурація Montash видалена.
+- Файли IML і список IDE-модулів вручну не створюються: їх формує Android Studio після успішного Gradle Sync. README містить відновлення імпорту для вже відкритого проєкту та діагностику порожнього Module.
+
+Перевірка через Gradle Tooling API (Android-модель для IDE) успішна: `:app`, тип `APPLICATION`, namespace `com.frop.montash`, 2 варіанти збірки. XML конфігурації app і Project System перевірені. Це підтверджує, що Gradle може надати Android-модуль IDE; імпорт у локальній Android Studio користувача потребує успішного Gradle Sync і сумісної версії IDE.
+
+## Ідентифікатор FROP і ресурси
+
+applicationId, namespace, Kotlin-пакети й тести переведені на `com.frop.montash`. MainActivity явно імпортує згенерований клас ресурсів через `import com.frop.montash.R as MontashResources`; фон звертається до `MontashResources.drawable`, без неоднозначного короткого імені R. FileProvider використовує `${applicationId}.photos`, тому автоматично отримує authority `com.frop.montash.photos`. Зміна applicationId означає окреме встановлення від попередньої тестової збірки; її дані автоматично не переносяться.
+
+Чиста перевірка після зміни пакета: `:app:clean :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug` — BUILD SUCCESSFUL (82 задачі). Перевірено наявність фону в згенерованому `com.frop.montash.R.drawable`, нові ID MainActivity/FileProvider у Manifest, відсутність старих пакетів у DEX і підпис APK.
