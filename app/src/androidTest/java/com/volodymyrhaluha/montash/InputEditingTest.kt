@@ -1,4 +1,4 @@
-package com.example.mounter
+package com.volodymyrhaluha.montash
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +30,7 @@ class InputEditingTest {
     @Test fun outsideTouchFinishesEditingAndPreservesText() {
         val value = mutableStateOf("")
         compose.setContent {
-            MounterTheme {
+            MontashTheme {
                 Column {
                     OutlinedTextField(value.value, { value.value = it },
                         modifier = Modifier.finishEditingOnOutsideTouch().testTag("field"))
@@ -46,7 +46,7 @@ class InputEditingTest {
 
     @Test fun touchesInsideKeepFocusAndAnotherFieldReceivesFocus() {
         compose.setContent {
-            MounterTheme {
+            MontashTheme {
                 Column {
                     OutlinedTextField("", {}, modifier = Modifier.finishEditingOnOutsideTouch().testTag("first"))
                     Spacer(Modifier.height(20.dp))
@@ -65,7 +65,7 @@ class InputEditingTest {
     @Test fun dialogButtonFinishesEditingAndActsOnFirstTouch() {
         var clicks = 0
         compose.setContent {
-            MounterTheme {
+            MontashTheme {
                 AlertDialog(onDismissRequest = {}, modifier = Modifier.dismissInputOnOutsideTouch(),
                     text = {
                         OutlinedTextField("", {},

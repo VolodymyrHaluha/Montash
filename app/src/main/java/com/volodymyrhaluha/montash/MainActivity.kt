@@ -1,4 +1,4 @@
-package com.example.mounter
+package com.volodymyrhaluha.montash
 
 import android.os.Bundle
 import android.content.Context
@@ -123,12 +123,12 @@ private class ProjectStore(private val context: Context) {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MounterTheme { MounterApp() } }
+        setContent { MontashTheme { MontashApp() } }
     }
 }
 
 @Composable
-fun MounterTheme(content: @Composable () -> Unit) {
+fun MontashTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Teal, onPrimary = CanvasColor,
@@ -147,7 +147,7 @@ fun MounterTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-internal fun MounterApp() {
+internal fun MontashApp() {
     val context = LocalContext.current
     val store = remember { ProjectStore(context) }
     var projects by remember { mutableStateOf(store.load()) }

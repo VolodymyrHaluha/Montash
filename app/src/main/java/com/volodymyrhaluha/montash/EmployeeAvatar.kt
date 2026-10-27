@@ -1,4 +1,4 @@
-package com.example.mounter
+package com.volodymyrhaluha.montash
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box

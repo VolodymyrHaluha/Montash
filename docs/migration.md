@@ -10,7 +10,7 @@
 
 ## Зміни
 
-- MainActivity запускає MounterApp без AttendanceGate та зовнішніх параметрів сесій.
+- MainActivity запускає MontashApp без AttendanceGate та зовнішніх параметрів сесій.
 - Видалені AttendanceGate, AttendanceAppSelection, AttendanceContract, обидва CardSessions, WorkHours і WorkHoursTimer та пов'язані тести. Таймер не замінений фіктивними даними.
 - Не перенесені `attendance-integration/`, `server/`, стара документація інтеграцій, архів-дублікат `app/src.zip` та налаштування IDE джерела.
 - Прибрані NFC permission/feature та queries сторонніх пакетів, провайдерів і списку встановлених додатків.
@@ -40,6 +40,12 @@
 - Тести інтерфейсу, включно з новим StandaloneLaunchTest, успішно скомпільовані у тестовий APK; на пристрої чи емуляторі не запускалися.
 - Зведений Manifest і готовий APK: applicationId Montash, без INTERNET, NFC та queries бізнес-додатків; приватний FileProvider фото належить Montash.
 - Підпис debug APK перевірено через apksigner.
-- XML валідні; `git diff --check` без зауважень. 28 збережених файлів основного коду та ресурсів побайтово збігаються з Mounter.
+- XML валідні; `git diff --check` без зауважень.
 
 APK зібрано з debug-підписом для тестового встановлення. Для публікації потрібно зібрати release із власним ключем підпису.
+
+## Самостійний пакет і конфігурація IDE
+
+Namespace, applicationId, пакети Kotlin і тестів, а також шляхи вихідних файлів узгоджені з `com.volodymyrhaluha.montash`. Теми та кореневий компонент називаються MontashTheme/MontashApp; XML-стилі — Theme.Montash.
+
+Прибрані застарілий Java-модуль IDE, його список модулів, машинозалежна прив’язка до JDK 25 і кеш пристроїв. `.idea/gradle.xml` підключає корінь і Android-модуль `app`. `.run/Montash.run.xml` додає Android App конфігурацію Montash для модуля Montash.app.main: Gradle-збірка, встановлення debug APK і запуск launcher activity на вибраному пристрої.
