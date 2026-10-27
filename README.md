@@ -10,6 +10,15 @@
 
 Видалено перевірку відмітки перед входом, вибір додатка відміток, запити до зовнішнього ContentProvider, його спостерігачі, NFC-передавання, callback повернення, зовнішні робочі сесії та їх таймери, серверні й інтеграційні заготовки.
 
+## Запуск в Android Studio
+
+1. Відкрити кореневу папку **Montash**, де лежить `settings.gradle.kts`, і дочекатися Gradle Sync. Проєкт має відкритися як Android/Gradle, модуль — `app`.
+2. У **Settings → Build, Execution, Deployment → Build Tools → Gradle** вибрати встановлений JDK 21 як Gradle JDK, якщо IDE попросить налаштувати Java. Шлях до JDK не зберігається в репозиторії.
+3. У списку конфігурацій запуску вибрати **Montash**: спільна конфігурація включена у `.run/Montash.run.xml`.
+4. Вибрати підключений пристрій з увімкненим USB debugging або емулятор (Android 7/API 24 чи новіший) і натиснути **Run ▶**. Android Studio збере debug APK, встановить його та запустить головний екран.
+
+Для запуску тестів інтерфейсу на цьому ж пристрої використати `./gradlew connectedDebugAndroidTest` або запустити тест із `app/src/androidTest` в IDE.
+
 ## Збірка
 
 Відкрити корінь у Android Studio. Потрібні JDK 21, Android SDK Platform 37.1 та Gradle 9.5.0 (wrapper включено). Версії Android Gradle Plugin і бібліотек збережені з Mounter. Для завантаження інструментів і залежностей потрібен інтернет; сам додаток працює офлайн.
@@ -21,6 +30,6 @@
 
 Друга команда потребує підключеного Android-пристрою або емулятора. Debug APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
-Назва: **Montash**. Ідентифікатор: `com.volodymyrhaluha.montash`. Можна встановлювати поруч із Mounter; дані з Mounter автоматично не імпортуються. Внутрішній namespace `com.example.mounter` збережено для мінімальної зміни вихідного коду.
+Назва: **Montash**. Ідентифікатор: `com.volodymyrhaluha.montash`. Можна встановлювати поруч із Mounter; дані з Mounter автоматично не імпортуються. Namespace, пакети основного коду й тестів — `com.volodymyrhaluha.montash`.
 
 Вихідна версія та звіт: [docs/migration.md](docs/migration.md).

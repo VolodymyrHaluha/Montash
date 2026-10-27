@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.mounter"
+    namespace = "com.volodymyrhaluha.montash"
     compileSdk {
         version = release(37) {
             minorApiLevel = 1

@@ -1,4 +1,4 @@
-package com.example.mounter.ui.theme
+package com.volodymyrhaluha.montash.ui.theme
 
 import android.app.Activity
 import android.os.Build
@@ -34,7 +34,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun MounterTheme(
+fun MontashTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     // Dynamic color is available on Android 12+
     dynamicColor: Boolean = true,

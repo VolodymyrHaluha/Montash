@@ -1,4 +1,4 @@
-package com.example.mounter
+package com.volodymyrhaluha.montash
 
 import android.content.Context
 import org.json.JSONArray

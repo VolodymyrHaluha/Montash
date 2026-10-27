@@ -1,4 +1,4 @@
-package com.example.mounter
+package com.volodymyrhaluha.montash
 
 import org.junit.Test
 
