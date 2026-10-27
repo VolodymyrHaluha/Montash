@@ -48,4 +48,13 @@ APK зібрано з debug-підписом для тестового вста�
 
 Namespace, applicationId, пакети Kotlin і тестів, а також шляхи вихідних файлів узгоджені з `com.volodymyrhaluha.montash`. Теми та кореневий компонент називаються MontashTheme/MontashApp; XML-стилі — Theme.Montash.
 
-Прибрані застарілий Java-модуль IDE, його список модулів, машинозалежна прив’язка до JDK 25 і кеш пристроїв. `.idea/gradle.xml` підключає корінь і Android-модуль `app`. `.run/Montash.run.xml` додає Android App конфігурацію Montash для модуля Montash.app.main: Gradle-збірка, встановлення debug APK і запуск launcher activity на вибраному пристрої.
+Прибрані застарілий Java-модуль IDE, його список модулів, машинозалежна прив’язка до JDK 25 і кеш пристроїв. `.idea/gradle.xml` підключає корінь і Android-модуль `app`. `.idea/runConfigurations/app.xml` додає стандартну Android App конфігурацію app для модуля Montash.app.main: Gradle-збірка, встановлення debug APK і запуск launcher activity на вибраному пристрої.
+
+## Імпорт Android-модуля та звичайний запуск app
+
+- `.idea/AndroidProjectSystem.xml` явно вибирає Android Gradle Project System.
+- У `.idea/gradle.xml` підключені корінь і `app`; прибрана прив’язка до локального псевдоніма JDK. JDK 21 налаштовується в Android Studio.
+- Конфігурація `app` зберігається у стандартній папці `.idea/runConfigurations`, посилається на Android main-модуль `Montash.app.main` і запускає Default Activity після Gradle-збірки. Стара конфігурація Montash видалена.
+- Файли IML і список IDE-модулів вручну не створюються: їх формує Android Studio після успішного Gradle Sync. README містить відновлення імпорту для вже відкритого проєкту та діагностику порожнього Module.
+
+Перевірка через Gradle Tooling API (Android-модель для IDE) успішна: `:app`, тип `APPLICATION`, namespace `com.volodymyrhaluha.montash`, 2 варіанти збірки. XML конфігурації app і Project System перевірені. Це підтверджує, що Gradle може надати Android-модуль IDE; імпорт у локальній Android Studio користувача потребує успішного Gradle Sync і сумісної версії IDE.

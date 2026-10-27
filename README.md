@@ -14,8 +14,12 @@
 
 1. Відкрити кореневу папку **Montash**, де лежить `settings.gradle.kts`, і дочекатися Gradle Sync. Проєкт має відкритися як Android/Gradle, модуль — `app`.
 2. У **Settings → Build, Execution, Deployment → Build Tools → Gradle** вибрати встановлений JDK 21 як Gradle JDK, якщо IDE попросить налаштувати Java. Шлях до JDK не зберігається в репозиторії.
-3. У списку конфігурацій запуску вибрати **Montash**: спільна конфігурація включена у `.run/Montash.run.xml`.
+3. У списку конфігурацій запуску вибрати **app**: стандартна Android App конфігурація включена у `.idea/runConfigurations/app.xml` і запускає головну Activity модуля `app`.
 4. Вибрати підключений пристрій з увімкненим USB debugging або емулятор (Android 7/API 24 чи новіший) і натиснути **Run ▶**. Android Studio збере debug APK, встановить його та запустить головний екран.
+
+Якщо проєкт уже був відкритий до цих змін: закрити його через **File → Close Project**, повторно відкрити кореневу папку Montash, виконати **File → Sync Project with Gradle Files** і вибрати **app** замість старої конфігурації Montash.
+
+Якщо список **Module** залишається порожнім, спочатку перевірити **Build → Sync**: модулі створює успішний Gradle Sync, а файл конфігурації запуску не може замінити імпорт. Для AGP 9.3 потрібна Android Studio, що підтримує цю версію плагіна; старіша IDE може відхилити синхронізацію. Помилки версії IDE/AGP, Gradle JDK або відсутнього Android SDK потрібно усунути за повідомленням Sync. Шлях SDK задається локально через SDK Manager / `local.properties` і не включається у Git.
 
 Для запуску тестів інтерфейсу на цьому ж пристрої використати `./gradlew connectedDebugAndroidTest` або запустити тест із `app/src/androidTest` в IDE.
 
