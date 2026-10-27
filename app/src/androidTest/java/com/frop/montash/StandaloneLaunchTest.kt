@@ -13,11 +13,12 @@ import org.junit.Test
 class StandaloneLaunchTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
 
-    @Test fun opensObjectsWithoutTeamOrGlobalProducts() {
+    @Test fun opensObjectsAndGlobalProductsWithoutTeam() {
         compose.onNodeWithText("Дані на пристрої").assertIsDisplayed()
         compose.onAllNodesWithText("Бригада").assertCountEquals(0)
         compose.onAllNodesWithText("Моя бригада").assertCountEquals(0)
-        compose.onAllNodesWithText("Вироби").assertCountEquals(0)
+        compose.onNodeWithTag("navigation-products").performClick()
+        compose.onNodeWithTag("object-products").assertIsDisplayed()
         compose.onNodeWithTag("navigation-objects").performClick()
         compose.onNodeWithText("Створити об'єкт").assertIsDisplayed()
     }

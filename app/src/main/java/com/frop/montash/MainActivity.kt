@@ -14,8 +14,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.saveable.rememberSaveable
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -31,7 +29,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,67 +61,6 @@ private val SolidSurface = Color(0xFF16261F)
 private val CanvasColor = Color(0xFF17261F)
 private val Red = Color(0xFFD96C67)
 private val Border = Color(0xFF537265)
-
-data class PhotoEntry(val path: String, val id: String = UUID.randomUUID().toString())
-data class WorkBlock(
-    val id: String = UUID.randomUUID().toString(),
-    val photos: List<PhotoEntry> = emptyList(),
-    val name: String = "",
-    val note: String = "",
-    val characteristics: String = "",
-    val drawings: List<DrawingEntry> = emptyList()
-)
-data class Project(
-    val name: String, val customer: String,
-    val id: String = UUID.randomUUID().toString(),
-    val blocks: List<WorkBlock> = emptyList(),
-    val customerId: String? = null
-) {
-    // Keep the old name field readable for previously saved objects.
-    val displayName: String get() = customer.ifBlank { name }
-}
-enum class Screen { HOME, OBJECTS, OBJECT_DETAIL }
-
-private class ProjectStore(private val context: Context) {
-    private val file get() = File(context.filesDir, "objects.json")
-    fun load(): List<Project> {
-        if (!file.exists()) return emptyList()
-        val data = JSONArray(file.readText())
-        return (0 until data.length()).map { i ->
-            val p = data.getJSONObject(i)
-            val blocks = p.getJSONArray("blocks")
-            Project(p.getString("name"), p.getString("customer"), p.getString("id"),
-                blocks = (0 until blocks.length()).map { j ->
-                    val b = blocks.getJSONObject(j)
-                    val photos = b.getJSONArray("photos")
-                    WorkBlock(b.getString("id"), (0 until photos.length()).map { k ->
-                        val photo = photos.getJSONObject(k)
-                        PhotoEntry(path=photo.getString("path"), id=photo.getString("id"))
-                    }, name = b.optString("name", ""), note = if(b.has("note")) b.optionalText("note") else {
-                        // Preserve existing per-photo notes as one shared product note.
-                        (0 until photos.length()).map {photos.getJSONObject(it).optionalText("note")}
-                            .filter {it.isNotBlank()}.distinct().joinToString("\n\n")
-                    }, characteristics = b.optionalText("characteristics"), drawings = readDrawings(b))
-                }, customerId = p.optionalText("customer_id").takeIf { it.isNotBlank() })
-        }
-    }
-    fun save(projects: List<Project>) {
-        val data = JSONArray()
-        projects.forEach { p ->
-            val blocks = JSONArray()
-            p.blocks.forEach { b ->
-                val photos = JSONArray()
-                b.photos.forEach { photo -> photos.put(JSONObject().put("id", photo.id).put("path", photo.path)) }
-                blocks.put(JSONObject().put("id", b.id).put("name", b.name).put("note", b.note)
-                    .put("characteristics", b.characteristics).put("photos", photos).put("drawings", drawingsJson(b.drawings)))
-            }
-            data.put(JSONObject().put("id", p.id).put("name", p.name).put("customer", p.customer).put("blocks", blocks).put("customer_id", p.customerId ?: JSONObject.NULL))
-        }
-        val temporary = File(context.filesDir, "objects.tmp")
-        temporary.writeText(data.toString())
-        check(temporary.renameTo(file)) { "Не вдалося зберегти об'єкти" }
-    }
-}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -178,13 +114,16 @@ internal fun MontashApp() {
     }
     var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var initialProductId by rememberSaveable { mutableStateOf<String?>(null) }
+    var objectReturnScreen by rememberSaveable { mutableStateOf(Screen.OBJECTS) }
     var photoSelection by rememberSaveable { mutableStateOf<List<String>?>(null) }
     fun update(project: Project) {
         val updated = projects.map { if (it.id == project.id) project else it }
         store.save(updated)
         projects = updated
     }
-    fun open(project: Project) { selectedId = project.id; screen = Screen.OBJECT_DETAIL }
+    fun open(project: Project) { selectedId = project.id; initialProductId = null; objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL }
+    fun openProduct(project: Project, product: WorkBlock) { selectedId = project.id; initialProductId = product.id; objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL }
     fun openPhoto(project: Project, block: WorkBlock, photo: PhotoEntry) {
         photoSelection = listOf(project.id, block.id, photo.id)
     }
@@ -201,7 +140,7 @@ internal fun MontashApp() {
         if (!stillUsed) runCatching { File(oldPhoto.path).delete() }
         if (newPath == null) photoSelection = null
     }
-    BackHandler(enabled = screen == Screen.OBJECTS) { screen = Screen.HOME }
+    BackHandler(enabled = screen == Screen.OBJECTS || screen == Screen.PRODUCTS) { screen = Screen.HOME }
     Box(Modifier.fillMaxSize().background(CanvasColor)) {
         Image(
             painter = painterResource(MontashResources.drawable.frop_logo_preview_01_1),
@@ -214,15 +153,20 @@ internal fun MontashApp() {
             AnimatedContent(targetState = screen, label = "screen", modifier = Modifier.weight(1f)) { current ->
                 when (current) {
                     Screen.HOME -> HomeScreen(projects, ::open, { screen = Screen.OBJECTS })
-                    Screen.OBJECTS -> ObjectsScreen(projects, clients, ::addClient, ::open, ::openPhoto) { project ->
+                    Screen.OBJECTS -> ObjectsScreen(projects, clients, ::addClient, ::open) { project ->
                         val updated = projects + project
                         store.save(updated)
                         projects = updated
                         open(project)
                     }
+                    Screen.PRODUCTS -> Column(Modifier.fillMaxSize().padding(28.dp, 22.dp)) {
+                        PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}")
+                        Spacer(Modifier.height(20.dp))
+                        ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth())
+                    }
                     Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
                         key(project.id) {
-                            ObjectDetail(project, { screen = Screen.OBJECTS }, { block, photo -> openPhoto(project, block, photo) }, ::update)
+                            ObjectDetail(project, { screen = objectReturnScreen }, { block, photo -> openPhoto(project, block, photo) }, ::update, initialProductId)
                         }
                     }
                 }
@@ -244,7 +188,7 @@ internal fun MontashApp() {
 
 @Composable
 private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit) {
-    val items = listOf(Screen.HOME to "Головна", Screen.OBJECTS to "Об'єкти")
+    val items = listOf(Screen.HOME to "Головна", Screen.OBJECTS to "Об'єкти", Screen.PRODUCTS to "Вироби")
     Column(
         Modifier.width(116.dp).fillMaxHeight().background(Surface).padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -276,6 +220,7 @@ private fun NavGlyph(screen: Screen, color: Color) {
         val s = size.minDimension
         when (screen) {
             Screen.HOME -> { drawRoundRect(color, Offset(s*.15f,s*.42f), Size(s*.7f,s*.48f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f)); val p=Path().apply{moveTo(s*.1f,s*.46f);lineTo(s*.5f,s*.1f);lineTo(s*.9f,s*.46f)};drawPath(p,color,style=Stroke(2.5f,cap=StrokeCap.Round)) }
+            Screen.PRODUCTS -> { drawRect(color, Offset(s*.2f,s*.1f), Size(s*.6f,s*.8f), style=Stroke(2.5f)); repeat(3) { drawLine(color, Offset(s*.32f,s*(.32f+it*.18f)), Offset(s*.68f,s*(.32f+it*.18f)), strokeWidth=2f) } }
             Screen.OBJECTS, Screen.OBJECT_DETAIL -> { drawRoundRect(color, Offset(s*.13f,s*.1f), Size(s*.74f,s*.8f), cornerRadius=androidx.compose.ui.geometry.CornerRadius(4f),style=Stroke(2.5f)); repeat(2){r->repeat(2){c->drawRect(color,Offset(s*(.26f+c*.31f),s*(.27f+r*.29f)),Size(s*.16f,s*.14f))}} }
 
         }
@@ -343,31 +288,28 @@ private fun HomeScreen(projects: List<Project>, onProject: (Project) -> Unit, on
 }
 
 @Composable
-private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddClient: (String) -> Client?, onProject: (Project) -> Unit, onPhoto: (Project, WorkBlock, PhotoEntry) -> Unit, onCreate: (Project) -> Unit) {
+private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddClient: (String) -> Client?, onProject: (Project) -> Unit, onCreate: (Project) -> Unit) {
     var creating by rememberSaveable { mutableStateOf(false) }
+    var objectName by rememberSaveable { mutableStateOf("") }
+    var objectDescription by rememberSaveable { mutableStateOf("") }
     var customer by rememberSaveable { mutableStateOf("") }
     var chosenClientId by rememberSaveable { mutableStateOf<String?>(null) }
     val chosenClient = clients.find { it.id == chosenClientId }
     val matches = clients.filter { nameKey(it.name).contains(nameKey(customer)) }
     Column(Modifier.fillMaxSize().padding(28.dp,22.dp)) {
-        PageHeader("Об'єкти", "${projects.size} об'єктів • фото та примітки") {
-            Button(onClick={ customer="";chosenClientId=null;creating=true }) { Text("Створити об'єкт") }
+        PageHeader("Об'єкти", "Всього: ${projects.size}") {
+            Button(onClick={ objectName="";objectDescription="";customer="";chosenClientId=null;creating=true }) { Text("Створити об'єкт") }
         }
         Spacer(Modifier.height(20.dp))
         if (projects.isEmpty()) Text("Створіть перший об'єкт: вкажіть замовника.", color=Muted)
-        LazyRow(
-            modifier=Modifier.weight(1f).fillMaxWidth(),
-            horizontalArrangement=Arrangement.spacedBy(16.dp)
-        ) {
-            items(projects, key={it.id}) { project ->
-                ObjectCard(project, Modifier.width(290.dp).fillParentMaxHeight(), { block, photo -> onPhoto(project, block, photo) }) { onProject(project) }
-            }
-        }
+        ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth())
     }
     if (creating) AlertDialog(
         modifier=Modifier.dismissInputOnOutsideTouch(),
         onDismissRequest={creating=false}, title={Text("Новий об'єкт")},
-        text={ Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
+        text={ Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(10.dp)) {
+            OutlinedTextField(objectName, { objectName=it }, label={Text("Назва об'єкта")}, singleLine=true)
+            OutlinedTextField(objectDescription, { objectDescription=it }, label={Text("Опис об'єкта")}, minLines=2)
             OutlinedTextField(customer, {customer=it;chosenClientId=null}, label={Text("Замовник")}, singleLine=true, modifier=Modifier.finishEditingOnOutsideTouch())
             if(chosenClient!=null) Text("Обрано: ${chosenClient.name}",color=Teal)
             else {
@@ -387,7 +329,7 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
             }
         } },
         confirmButton={ TextButton(enabled=chosenClient!=null, onClick={
-            chosenClient?.let {client -> onCreate(Project(name=client.name,customer=client.name,customerId=client.id))}
+            chosenClient?.let {client -> onCreate(Project(name=objectName.trim().ifBlank { client.name },customer=client.name,customerId=client.id,description=objectDescription))}
             customer="";chosenClientId=null;creating=false
         }) {Text("Створити")} },
         dismissButton={TextButton(onClick={creating=false}) {Text("Скасувати")}}
@@ -395,46 +337,9 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
 }
 
 @Composable
-private fun ObjectCard(project: Project, modifier: Modifier, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onOpen: () -> Unit) {
-    SurfaceCard(modifier) {
-        Text(project.displayName, fontWeight=FontWeight.Bold, fontSize=18.sp,
-            modifier=Modifier.fillMaxWidth().clickable(onClick=onOpen))
-        Spacer(Modifier.height(6.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically) {
-            Text("Виробів: ${project.blocks.size}", color=Muted, fontSize=12.sp, modifier=Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(12.dp))
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement=Arrangement.spacedBy(14.dp)) {
-            items(project.blocks, key={it.id}) { product ->
-                Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    Text(product.name.ifBlank {"Виріб без назви"}, fontWeight=FontWeight.SemiBold, fontSize=13.sp)
-                    Text("Характеристики", fontWeight=FontWeight.SemiBold, fontSize=12.sp)
-                    Text(product.characteristics.ifBlank {"Характеристики ще не додані"},
-                        color=if(product.characteristics.isBlank()) Muted else Ink, fontSize=12.sp)
-                    if(product.photos.isEmpty()) {
-                        Box(Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(14.dp))
-                            .background(CanvasColor).clickable(onClick=onOpen), contentAlignment=Alignment.Center) {
-                            Text("Фото ще не додані", color=Muted)
-                        }
-                    }
-                    product.photos.forEach {photo ->
-                        key(photo.id) {
-                            Box(Modifier.clickable { onPhoto(product, photo) }) { PhotoPreview(photo.path, height=160.dp) }
-                        }
-                    }
-                    Text(product.note.ifBlank {"Примітка ще не додана"},
-                        color=if(product.note.isBlank()) Muted else Ink, fontSize=12.sp)
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
-        Button(onClick=onOpen, modifier=Modifier.fillMaxWidth()) { Text("Відкрити об'єкт") }
-    }
-}
-
-@Composable
-internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onUpdate: (Project) -> Unit) {
-    var productId by rememberSaveable(project.id) { mutableStateOf<String?>(null) }
+internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onUpdate: (Project) -> Unit, initialProductId: String? = null) {
+    var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
+    var editingObject by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val product = project.blocks.find { it.id == productId }
     BackHandler { if (product != null) productId = null else onBack() }
@@ -447,6 +352,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                 Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
                 Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
             }
+            TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
             Button(onClick = {
                 val added = WorkBlock()
                 try {
@@ -460,14 +366,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         Spacer(Modifier.height(18.dp))
         if (product == null) {
             if (project.blocks.isEmpty()) Text("Додайте перший виріб до об'єкта.", color = Muted)
-            LazyRow(
-                Modifier.weight(1f).fillMaxWidth().testTag("object-products"),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                items(project.blocks, key = { it.id }) { block ->
-                    ProductSummary(block, Modifier.width(260.dp).fillParentMaxHeight()) { productId = block.id }
-                }
-            }
+            ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth())
         } else key(product.id) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 TextButton(onClick = { productId = null }) { Text("До списку виробів") }
@@ -478,30 +377,21 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                     ProductBlock(product, { photo -> onPhoto(product, photo) }) { updated ->
                         onUpdate(project.copy(blocks = project.blocks.map { if (it.id == updated.id) updated else it }))
                     }
-                    ProductDrawings(product) { updated ->
+                    ProductMedia(product) { updated ->
                         onUpdate(project.copy(blocks = project.blocks.map { if (it.id == updated.id) updated else it }))
                     }
                 }
             }
         }
     }
-}
-
-@Composable
-private fun ProductSummary(block: WorkBlock, modifier: Modifier, onOpen: () -> Unit) {
-    SurfaceCard(modifier.clickable(onClick = onOpen).testTag("product-${block.id}")) {
-        Text(block.name.ifBlank { "Виріб без назви" }, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-        Spacer(Modifier.height(14.dp))
-        val photo = block.photos.firstOrNull()
-        if (photo != null) {
-            PhotoImage(photo.path, Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(14.dp)).background(CanvasColor),
-                placeholder = { ProductPlaceholder(Modifier.fillMaxSize()) })
-        } else ProductPlaceholder(Modifier.fillMaxWidth().weight(1f))
+    if (editingObject) ObjectEditDialog(project, { editingObject = false }) { updated ->
+        try { onUpdate(updated); editingObject = false } catch (failure: Exception) { error = failure.message }
     }
+
 }
 
 @Composable
-private fun ProductPlaceholder(modifier: Modifier = Modifier) {
+internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
     Image(painterResource(MontashResources.drawable.icon), contentDescription = "Фото виробу відсутнє",
         contentScale = ContentScale.Fit, modifier = modifier.padding(24.dp))
 }
@@ -574,10 +464,12 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             }) {Text("Сфотографувати")}
         }
         Spacer(Modifier.height(12.dp))
+        StatusPicker(block.status) { update(currentBlock.copy(status = it)) }
+        Spacer(Modifier.height(12.dp))
         OutlinedTextField(
-            value=block.characteristics,
-            onValueChange={text -> update(currentBlock.copy(characteristics=text))},
-            label={Text("Характеристики")},
+            value=block.description,
+            onValueChange={text -> update(currentBlock.copy(description=text))},
+            label={Text("Опис")},
             placeholder={Text("Наприклад: розміри, матеріал, колір — у довільній формі")},
             modifier=Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines=3
         )
@@ -624,7 +516,7 @@ private fun PhotoPreview(path: String, height: androidx.compose.ui.unit.Dp = 260
 }
 
 @Composable
-private fun PhotoImage(path: String, modifier: Modifier, maxDimension: Int = 1600, placeholder: (@Composable () -> Unit)? = null) {
+internal fun PhotoImage(path: String, modifier: Modifier, maxDimension: Int = 1600, placeholder: (@Composable () -> Unit)? = null) {
     var bitmap by remember(path) {mutableStateOf<android.graphics.Bitmap?>(null)}
     var failed by remember(path) {mutableStateOf(false)}
     LaunchedEffect(path, maxDimension) {
