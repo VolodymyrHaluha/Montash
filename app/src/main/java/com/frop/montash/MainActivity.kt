@@ -3,6 +3,8 @@ package com.frop.montash
 import com.frop.montash.R as MontashResources
 
 import android.os.Bundle
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.core.content.FileProvider
@@ -16,7 +18,10 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.testTag
 import androidx.activity.ComponentActivity
@@ -93,12 +98,57 @@ internal fun MontashApp() {
     val context = LocalContext.current
     val store = remember { ProjectStore(context) }
     var projects by remember { mutableStateOf(store.load()) }
+    val remote = remember { RemoteProjects(context) }
+    val monitor = remember { ServerConnectionMonitor(context, remote) }
+    var serverConnection by remember { mutableStateOf(ServerConnection.CHECKING) }
+    val locationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val directoryStore = remember { LocalDirectoryStore(context) }
     var clients by remember { mutableStateOf(directoryStore.loadClients(projects)) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun localError(error: Exception) {
         scope.launch { snackbar.showSnackbar(error.message ?: "Не вдалося зберегти дані на пристрої.", actionLabel="Закрити") }
+    }
+    LaunchedEffect(Unit) {
+        if (remote.enabled && BuildConfig.MONTASH_LOCAL_API_URL.isNotBlank() &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
+            PackageManager.PERMISSION_GRANTED) {
+            locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+    LaunchedEffect(monitor) {
+        var checks = 0
+        while (isActive) {
+            val current = monitor.check()
+            val changed = current != serverConnection
+            serverConnection = current
+            if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
+                if (changed || checks % 6 == 0) {
+                    try {
+                        val refreshed = remote.refresh(store.load(), current)
+                        store.save(refreshed)
+                        projects = refreshed
+                        if (current == ServerConnection.GLOBAL || remote.globalHealthy()) remote.upload(store)
+                    } catch (error: Exception) {
+                        if (changed) localError(error)
+                    }
+                }
+            }
+            checks++
+            delay(5_000)
+        }
+    }
+    fun sendProject(id: String) {
+        if (remote.enabled) {
+            try {
+                remote.markPending(id)
+                scope.launch {
+                    if (serverConnection == ServerConnection.GLOBAL || remote.globalHealthy()) {
+                        try { remote.upload(store) } catch (error: Exception) { localError(error) }
+                    }
+                }
+            } catch (error: Exception) { localError(error) }
+        }
     }
     fun addClient(value: String): Client? {
         val name = cleanName(value)
@@ -121,6 +171,7 @@ internal fun MontashApp() {
         val updated = projects.map { if (it.id == project.id) project else it }
         store.save(updated)
         projects = updated
+        sendProject(project.id)
     }
     fun open(project: Project) { selectedId = project.id; initialProductId = null; objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL }
     fun openProduct(project: Project, product: WorkBlock) { selectedId = project.id; initialProductId = product.id; objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL }
@@ -152,11 +203,12 @@ internal fun MontashApp() {
             NavigationRail(screen) { screen = it }
             AnimatedContent(targetState = screen, label = "screen", modifier = Modifier.weight(1f)) { current ->
                 when (current) {
-                    Screen.HOME -> HomeScreen(projects, ::open, { screen = Screen.OBJECTS })
+                    Screen.HOME -> HomeScreen(projects, serverConnection, ::open, { screen = Screen.OBJECTS })
                     Screen.OBJECTS -> ObjectsScreen(projects, clients, ::addClient, ::open) { project ->
                         val updated = projects + project
                         store.save(updated)
                         projects = updated
+                        sendProject(project.id)
                         open(project)
                     }
                     Screen.PRODUCTS -> Column(Modifier.fillMaxSize().padding(28.dp, 22.dp)) {
@@ -232,12 +284,14 @@ private fun PageHeader(title: String, subtitle: String, action: (@Composable () 
 }
 
 @Composable
-private fun HomeScreen(projects: List<Project>, onProject: (Project) -> Unit, onObjects: () -> Unit) {
+private fun HomeScreen(projects: List<Project>, connection: ServerConnection, onProject: (Project) -> Unit, onObjects: () -> Unit) {
     var visibleProjectCount by rememberSaveable { mutableIntStateOf(5) }
     val visibleProjects = projects.take(visibleProjectCount)
     Column(Modifier.fillMaxSize().padding(28.dp, 22.dp, 28.dp, 18.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically) {
             Text("Об’єктів: ${projects.size}", color=Muted, fontSize=13.sp, modifier=Modifier.weight(1f))
+            Text(connection.label, color=if (connection == ServerConnection.LOCAL || connection == ServerConnection.GLOBAL) Teal else Muted,
+                fontSize=12.sp, modifier=Modifier.testTag("server-connection"))
             Spacer(Modifier.width(14.dp))
             Surface(shape=RoundedCornerShape(13.dp), color=Surface, border=androidx.compose.foundation.BorderStroke(1.dp,Border)) {
                 Text("Дані на пристрої", color=Muted, fontSize=12.sp, modifier=Modifier.padding(14.dp,9.dp))
