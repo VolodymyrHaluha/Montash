@@ -193,10 +193,6 @@ private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit) {
         Modifier.width(116.dp).fillMaxHeight().background(Surface).padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(Modifier.size(48.dp).clip(RoundedCornerShape(14.dp)).background(Teal), contentAlignment = Alignment.Center) {
-            Text("М", color = CanvasColor, fontSize = 25.sp, fontWeight = FontWeight.Black)
-        }
-        Spacer(Modifier.height(34.dp))
         items.forEach { (screen, label) ->
             val selected = active == screen || (screen == Screen.OBJECTS && active in listOf(Screen.OBJECT_DETAIL))
             Column(
