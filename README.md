@@ -1,6 +1,6 @@
 # Montash
 
-Android-додаток для монтажних робіт на основі [Mounter](https://github.com/VolodymyrHaluha/Mounter). ApplicationId, namespace та Kotlin-пакети — `com.frop.montash`. Додаток працює локально без конфігурації сервера; для PostgreSQL-синхронізації використовує наявні сервери FROP GLOBAL і LOCAL через [маршрути Montash](server_montash/README.md).
+Android-додаток для монтажних робіт на основі [Mounter](https://github.com/VolodymyrHaluha/Mounter). ApplicationId, namespace та Kotlin-пакети — `com.frop.montash`. Додаток працює локально без конфігурації сервера; для PostgreSQL-синхронізації використовує наявні сервери FROP GLOBAL і LOCAL. Код їхніх маршрутів Montash зберігається в окремому репозиторії FROP-SERVER-TEST-V.
 
 ## Об'єкти та вироби
 
@@ -30,13 +30,15 @@ Android-додаток для монтажних робіт на основі [M
 
 ### Файли інтеграції з серверами
 
-Папка [`server_montash/`](server_montash/README.md) містить код для підключення Montash до наявних серверів FROP. Вона не запускається як окремий сервер:
+Папка `server_montash` тепер знаходиться в репозиторії `FROP-SERVER-TEST-V`. Її шлях записаний у кореневому `.env` Montash як `MONTASH_SERVER_SOURCE_DIR`; його читає скрипт `install_server_montash.py`. Android не читає цей шлях і не звертається до файлів на комп'ютері: для нього важливі лише URL та токен API з `.env` під час збірки.
 
 - `server_montash/app.py` — маршрути Flask `/api/montash/*` для перевірки підключення, роботи з об'єктами та синхронізації GLOBAL → LOCAL. Під час встановлення файл копіюється до папок GLOBAL і LOCAL під назвою `montash_api.py`.
-- `server_montash/install_existing_servers.py` — встановлює й оновлює маршрути в наявних `GLOBAL/app.py` та `LOCAL/app.py` і передає клієнтський токен із кореневого `.env` до конфігурацій серверів. Його запускають після змін у `server_montash/app.py`, а не під час кожного запуску серверів.
+- `server_montash/install_existing_servers.py` — встановлює й оновлює маршрути в наявних `GLOBAL/app.py` та `LOCAL/app.py`. Після перенесення читає токен із `GLOBAL/.env`, де він уже налаштований. Його запускають після змін у `server_montash/app.py`, а не під час кожного запуску серверів.
 - `server_montash/README.md` — інструкція з встановлення та опис конфігурації.
 
-Самі GLOBAL і LOCAL запускаються їхніми `.bat`-файлами в `D:\virtual environment\myenv\FROP-SERVER-TEST-V`. Адреси й токени налаштовуються в приватних `.env` файлах.
+Після змін у серверному `server_montash/app.py` запустіть із кореня Montash `python install_server_montash.py`. Скрипт використає `MONTASH_SERVER_SOURCE_DIR` і викличе перенесений інсталятор. Для цього в Python має бути встановлено `python-dotenv`.
+
+Самі GLOBAL і LOCAL запускаються їхніми `.bat`-файлами в `D:\virtual environment\myenv\FROP-SERVER-TEST-V`. Після зміни клієнтського токена його треба однаково оновити в Montash `.env` та серверних `.env`, а потім перебудувати Android-додаток. Адреси налаштовуються в приватних `.env` файлах.
 
 Додаток має дозвіл INTERNET для зв’язку з налаштованим API. NFC немає. Системні камера й вибір файлів збережені за вимогою користувача. RECORD_AUDIO запитується тільки для голосового запису.
 
