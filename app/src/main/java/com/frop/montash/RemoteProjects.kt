@@ -77,8 +77,8 @@ internal class RemoteProjects(context: Context) {
             val remote = (0 until array.length()).map { index ->
                 val value = array.getJSONObject(index)
                 val id = value.getString("id")
-                if (fromGlobal && id !in pending) {
-                    preferences.edit().putLong("revision:$id", value.getLong("revision")).apply()
+                if (id !in pending) {
+                    preferences.edit().putLong("revision:${server.name}:$id", value.getLong("revision")).apply()
                 }
                 value.remove("revision")
                 value
@@ -86,7 +86,7 @@ internal class RemoteProjects(context: Context) {
             val remoteProjects = projectsFromJson(JSONArray(remote).toString())
             val remoteIds = remoteProjects.mapTo(mutableSetOf()) { it.id }
             val localOnly = local.filter { it.id !in remoteIds }
-            if (fromGlobal) localOnly.forEach { markPending(it.id) }
+            localOnly.forEach { markPending(it.id) }
             remoteProjects.map { remoteProject ->
                 local.firstOrNull { it.id == remoteProject.id && it.id in pending } ?: remoteProject
             } + localOnly
@@ -102,15 +102,16 @@ internal class RemoteProjects(context: Context) {
 
     private fun pendingIds(): Set<String> = preferences.getStringSet("pending", emptySet())?.toSet().orEmpty()
 
-    suspend fun upload(store: ProjectStore) = withContext(Dispatchers.IO) {
+    suspend fun upload(store: ProjectStore, server: ServerConnection) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            if (!enabled) return@withLock
+            if (!enabled || server !in setOf(ServerConnection.LOCAL, ServerConnection.GLOBAL)) return@withLock
+            val endpoint = if (server == ServerConnection.LOCAL) localEndpoint else globalEndpoint
             for (id in pendingIds()) {
                 val project = store.load().firstOrNull { it.id == id } ?: continue
                 val body = JSONArray(projectsToJson(listOf(project))).getJSONObject(0)
-                    .put("revision", preferences.getLong("revision:$id", 0L))
-                val result = request(globalEndpoint, "PUT", "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}", body.toString())
-                preferences.edit().putLong("revision:$id", result.getLong("revision")).apply()
+                    .put("revision", preferences.getLong("revision:${server.name}:$id", 0L))
+                val result = request(endpoint, "PUT", "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}", body.toString())
+                preferences.edit().putLong("revision:${server.name}:$id", result.getLong("revision")).apply()
                 // A newer edit may have arrived while this request was in flight.
                 val unchanged = store.load().firstOrNull { it.id == id } == project
                 if (unchanged) {
