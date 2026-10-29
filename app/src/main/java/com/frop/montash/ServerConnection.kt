@@ -8,6 +8,7 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,6 +24,7 @@ internal enum class ServerConnection(val label: String) {
 
 internal class ServerConnectionMonitor(private val context: Context, private val remote: RemoteProjects) {
     private val localSsid = BuildConfig.MONTASH_LOCAL_WIFI_SSID.trim()
+    private var lastGlobalSuccessAt = 0L
 
     suspend fun check(): ServerConnection = withContext(Dispatchers.IO) {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -40,8 +42,19 @@ internal class ServerConnectionMonitor(private val context: Context, private val
 
         val onLocalWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
             localSsid.isNotEmpty() && currentSsid(capabilities) == localSsid
-        if (onLocalWifi && remote.localHealthy()) return@withContext ServerConnection.LOCAL
-        if (remote.globalHealthy()) ServerConnection.GLOBAL else ServerConnection.SERVER_UNAVAILABLE
+        if (onLocalWifi && remote.localHealthy()) {
+            lastGlobalSuccessAt = 0L
+            return@withContext ServerConnection.LOCAL
+        }
+        val result = if (remote.globalHealthy()) {
+            lastGlobalSuccessAt = SystemClock.elapsedRealtime()
+            ServerConnection.GLOBAL
+        } else if (lastGlobalSuccessAt != 0L && SystemClock.elapsedRealtime() - lastGlobalSuccessAt < 15_000) {
+            ServerConnection.GLOBAL
+        } else {
+            ServerConnection.SERVER_UNAVAILABLE
+        }
+        result
     }
 
     private fun currentSsid(capabilities: NetworkCapabilities): String? {

@@ -1,6 +1,7 @@
 package com.frop.montash
 
 import android.content.Context
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,7 +21,11 @@ internal class RemoteProjects(context: Context) {
 
     val enabled: Boolean get() = globalEndpoint.isNotEmpty() && token.isNotEmpty()
 
-    suspend fun globalHealthy(): Boolean = healthy(globalEndpoint, "global", 8_000)
+    suspend fun globalHealthy(): Boolean {
+        if (healthy(globalEndpoint, "global", 8_000)) return true
+        delay(500)
+        return healthy(globalEndpoint, "global", 8_000)
+    }
     suspend fun localHealthy(): Boolean = healthy(localEndpoint, "local", 2_000)
 
     private suspend fun healthy(endpoint: String, expectedMode: String, timeoutMs: Int): Boolean = withContext(Dispatchers.IO) {
