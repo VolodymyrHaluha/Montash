@@ -10,49 +10,42 @@ import org.junit.Test
 class ObjectProductsTest {
     @get:Rule val compose = createComposeRule()
 
-    @Test fun summaryOpensOnlySelectedProductAndEditsItsData() {
+    @Test fun newProductIsSavedOnlyAfterConfirmation() {
+        val project = mutableStateOf(Project("Об'єкт", "Замовник"))
+        compose.setContent {
+            MontashTheme { ObjectDetail(project.value, {}, { _, _ -> }, { project.value = it }) }
+        }
+        compose.onNodeWithTag("add-product").performClick()
+        compose.onNodeWithTag("product-name").performTextReplacement("Чернетка виробу")
+        compose.runOnIdle { assertEquals(0, project.value.blocks.size) }
+        compose.onNodeWithTag("cancel-product").performClick()
+        compose.runOnIdle { assertEquals(0, project.value.blocks.size) }
+        compose.onNodeWithTag("add-product").performClick()
+        compose.onNodeWithTag("product-name").performTextReplacement("Збережений виріб")
+        compose.onNodeWithTag("save-product").performClick()
+        compose.runOnIdle {
+            assertEquals(1, project.value.blocks.size)
+            assertEquals("Збережений виріб", project.value.blocks[0].name)
+        }
+    }
+
+    @Test fun existingProductIsReadOnlyUntilEditAndCancelRestoresIt() {
         val project = mutableStateOf(Project("Об'єкт", "Замовник", blocks = listOf(
-            WorkBlock(id = "first", name = "Перший", description = "Дані першого"),
-            WorkBlock(id = "second", name = "Другий", description = "Дані другого")
+            WorkBlock(id = "first", name = "Перший", description = "Початковий опис")
         )))
         compose.setContent {
             MontashTheme { ObjectDetail(project.value, {}, { _, _ -> }, { project.value = it }) }
         }
-        compose.onNodeWithTag("product-name").assertDoesNotExist()
-        compose.onNodeWithTag("product-first").assert(hasContentDescription("Фото виробу відсутнє"))
-        compose.onNodeWithTag("object-products").performScrollToNode(hasTestTag("product-second"))
-        compose.onNodeWithTag("product-second").performClick()
-        compose.onNodeWithText("Дані другого").assertIsDisplayed()
-        compose.onNodeWithTag("product-status").assertIsDisplayed()
-        compose.onNodeWithTag("product-name").performTextReplacement("Оновлений другий")
-        compose.onNodeWithTag("product-status").performClick()
-        compose.onNodeWithText("Виконано").performClick()
-        compose.runOnIdle {
-            assertEquals(WorkStatus.DONE, project.value.blocks[1].status)
-            assertEquals("Оновлений другий", project.value.blocks[1].name)
-            assertEquals("Перший", project.value.blocks[0].name)
-        }
-        compose.onNodeWithText("До списку виробів").performClick()
-        compose.onNodeWithTag("object-products").performScrollToNode(hasText("Оновлений другий"))
-        compose.onNodeWithText("Оновлений другий").assertIsDisplayed()
-    }
-
-    @Test fun addActionStaysVisibleAfterScrollingListAndProductDetails() {
-        val project = mutableStateOf(Project("Об'єкт", "Замовник", blocks = (0..20).map {
-            WorkBlock(id = "p$it", name = "Виріб $it")
-        }))
-        compose.setContent {
-            MontashTheme { ObjectDetail(project.value, {}, { _, _ -> }, { project.value = it }) }
-        }
-        compose.onNodeWithTag("object-products").performScrollToNode(hasTestTag("product-p20"))
-        compose.onNodeWithTag("add-product").assertIsDisplayed().performClick()
-        compose.runOnIdle { assertEquals(22, project.value.blocks.size) }
-        compose.onNodeWithTag("product-name").performTextReplacement("Новий виріб")
-        compose.onNodeWithText("Додати медіа").performScrollTo()
-        compose.onNodeWithTag("add-product").assertIsDisplayed().performClick()
-        compose.runOnIdle {
-            assertEquals(23, project.value.blocks.size)
-            assertEquals("Новий виріб", project.value.blocks[21].name)
-        }
+        compose.onNodeWithTag("product-first").performClick()
+        compose.onNodeWithTag("product-name").assertIsNotEnabled()
+        compose.onNodeWithTag("edit-product").performClick()
+        compose.onNodeWithTag("product-name").performTextReplacement("Зміна")
+        compose.runOnIdle { assertEquals("Перший", project.value.blocks[0].name) }
+        compose.onNodeWithTag("cancel-product").performClick()
+        compose.onNodeWithTag("product-name").assertTextContains("Перший")
+        compose.onNodeWithTag("edit-product").performClick()
+        compose.onNodeWithTag("product-name").performTextReplacement("Змінений")
+        compose.onNodeWithTag("save-product").performClick()
+        compose.runOnIdle { assertEquals("Змінений", project.value.blocks[0].name) }
     }
 }

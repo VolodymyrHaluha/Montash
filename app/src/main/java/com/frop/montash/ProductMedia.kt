@@ -23,7 +23,7 @@ import java.io.File
 import java.util.UUID
 
 @Composable
-internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit) {
+internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, editable: Boolean = true) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val latestBlock by rememberUpdatedState(block)
@@ -127,8 +127,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Медіа та голосові повідомлення", style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(enabled = !busy && recorder == null, onClick = { picker.launch(arrayOf("image/*", "video/*", "audio/*")) }) { Text("Додати медіа") }
-                Button(enabled = !busy, onClick = {
+                OutlinedButton(enabled = editable && !busy && recorder == null, onClick = { picker.launch(arrayOf("image/*", "video/*", "audio/*")) }) { Text("Додати медіа") }
+                Button(enabled = editable && !busy, onClick = {
                     if (recorder != null) finishRecording()
                     else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) beginRecording()
                     else permission.launch(Manifest.permission.RECORD_AUDIO)
@@ -141,11 +141,10 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit) {
             block.media.forEach { entry ->
                 Row(Modifier.fillMaxWidth()) {
                     TextButton(modifier = Modifier.weight(1f), enabled = recorder == null, onClick = { viewing = entry }) { Text(entry.name) }
-                    TextButton(enabled = !busy && recorder == null, onClick = {
+                    TextButton(enabled = editable && !busy && recorder == null, onClick = {
                         try {
                             update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == entry.id }))
                             if (viewing?.id == entry.id) viewing = null
-                            File(entry.path).delete()
                         } catch (failure: Exception) { error = failure.message }
                     }) { Text("Видалити") }
                 }

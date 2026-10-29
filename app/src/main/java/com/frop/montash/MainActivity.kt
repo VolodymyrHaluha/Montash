@@ -382,14 +382,36 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
 @Composable
 internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onUpdate: (Project) -> Unit, initialProductId: String? = null) {
     var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
+    var draft by remember(project.id) { mutableStateOf<WorkBlock?>(null) }
+    var creating by remember(project.id) { mutableStateOf(false) }
+    var viewingPhoto by remember { mutableStateOf<PhotoEntry?>(null) }
     var editingObject by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    val product = project.blocks.find { it.id == productId }
-    BackHandler { if (product != null) productId = null else onBack() }
+    val savedProduct = project.blocks.find { it.id == productId }
+    val product = draft ?: savedProduct
+
+    fun cancelProduct() {
+        val originalPaths = savedProduct?.let { old ->
+            (old.photos.map { it.path } + old.media.map { it.path }).toSet()
+        }.orEmpty()
+        draft?.let { current ->
+            (current.photos.map { it.path } + current.media.map { it.path })
+                .filterNot { it in originalPaths }.forEach { File(it).delete() }
+        }
+        draft = null
+        viewingPhoto = null
+        if (creating) productId = null
+        creating = false
+        error = null
+    }
+    fun leaveProduct() {
+        if (draft != null) cancelProduct() else productId = null
+    }
+    BackHandler(enabled = product != null) { leaveProduct() }
+
     Column(Modifier.fillMaxSize().padding(28.dp, 20.dp)) {
-        // Keep the object header and add action outside both scrolling views.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            BackButton { if (product != null) productId = null else onBack() }
+            BackButton { if (product != null) leaveProduct() else onBack() }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
@@ -397,12 +419,12 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
             }
             TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
             Button(onClick = {
+                if (draft != null) cancelProduct()
                 val added = WorkBlock()
-                try {
-                    onUpdate(project.copy(blocks = project.blocks + added))
-                    productId = added.id
-                    error = null
-                } catch (failure: Exception) { error = failure.message ?: "Не вдалося додати виріб." }
+                productId = added.id
+                draft = added
+                creating = true
+                error = null
             }, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
         }
         error?.let { Text(it, color = Red) }
@@ -412,25 +434,56 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
             ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth())
         } else key(product.id) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
-                TextButton(onClick = { productId = null }) { Text("До списку виробів") }
+                TextButton(onClick = ::leaveProduct) { Text("До списку виробів") }
                 Column(
                     Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("product-details"),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    ProductBlock(product, { photo -> onPhoto(product, photo) }) { updated ->
-                        onUpdate(project.copy(blocks = project.blocks.map { if (it.id == updated.id) updated else it }))
+                    ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated }, editable = draft != null)
+                    ProductMedia(product, { updated -> if (draft?.id == updated.id) draft = updated }, editable = draft != null)
+                }
+                Spacer(Modifier.height(12.dp))
+                if (draft == null) {
+                    Button(onClick = { draft = savedProduct?.copy(); error = null }, modifier = Modifier.testTag("edit-product")) {
+                        Text("Редагувати")
                     }
-                    ProductMedia(product) { updated ->
-                        onUpdate(project.copy(blocks = project.blocks.map { if (it.id == updated.id) updated else it }))
+                } else {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(onClick = ::cancelProduct, modifier = Modifier.testTag("cancel-product")) {
+                            Text("Скасувати")
+                        }
+                        Button(onClick = {
+                            val changed = draft ?: return@Button
+                            try {
+                                val blocks = if (creating) project.blocks + changed
+                                    else project.blocks.map { if (it.id == changed.id) changed else it }
+                                onUpdate(project.copy(blocks = blocks))
+                                draft = null
+                                creating = false
+                                error = null
+                            } catch (failure: Exception) {
+                                error = failure.message ?: "Не вдалося зберегти виріб."
+                            }
+                        }, modifier = Modifier.testTag("save-product")) { Text("Зберегти") }
                     }
                 }
             }
         }
     }
+    viewingPhoto?.let { photo ->
+        PhotoViewer(photo, onClose = { viewingPhoto = null }, editable = draft != null,
+            onReplace = { path ->
+                draft = draft?.copy(photos = draft!!.photos.map { if (it.id == photo.id) it.copy(path = path) else it })
+                viewingPhoto = viewingPhoto?.copy(path = path)
+            },
+            onDelete = {
+                draft = draft?.copy(photos = draft!!.photos.filterNot { it.id == photo.id })
+                viewingPhoto = null
+            })
+    }
     if (editingObject) ObjectEditDialog(project, { editingObject = false }) { updated ->
         try { onUpdate(updated); editingObject = false } catch (failure: Exception) { error = failure.message }
     }
-
 }
 
 @Composable
@@ -440,7 +493,7 @@ internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit) {
+private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit, editable: Boolean) {
     val context=LocalContext.current
     val currentBlock by rememberUpdatedState(block)
     val update by rememberUpdatedState(onUpdate)
@@ -450,7 +503,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
     val scope=rememberCoroutineScope()
     val camera=rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         pendingPath?.let {path ->
-            if(success) update(currentBlock.copy(photos=currentBlock.photos+PhotoEntry(path))) else File(path).delete()
+            if(success && editable) update(currentBlock.copy(photos=currentBlock.photos+PhotoEntry(path))) else File(path).delete()
         }
         pendingPath=null
     }
@@ -477,7 +530,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                             }
                         }
                     }
-                    if(imported.isNotEmpty()) update(currentBlock.copy(photos=currentBlock.photos+imported))
+                    if(imported.isNotEmpty() && editable) update(currentBlock.copy(photos=currentBlock.photos+imported))
                     if(imported.size<uris.size) error="Не вдалося додати ${uris.size-imported.size} фото. Спробуйте ще раз."
                 } finally {
                     importing=false
@@ -490,15 +543,16 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             OutlinedTextField(
                 value=block.name,
                 onValueChange={name -> update(currentBlock.copy(name=name))},
+                enabled=editable,
                 label={Text("Назва виробу")},
                 placeholder={Text("Наприклад, шафа")},
                 singleLine=true,
                 modifier=Modifier.weight(1f).testTag("product-name").finishEditingOnOutsideTouch()
             )
             Spacer(Modifier.width(12.dp))
-            OutlinedButton(enabled=!importing, onClick={gallery.launch("image/*")}) {Text(if(importing) "Додаємо фото…" else "Додати фото")}
+            OutlinedButton(enabled=editable && !importing, onClick={gallery.launch("image/*")}) {Text(if(importing) "Додаємо фото…" else "Додати фото")}
             Spacer(Modifier.width(10.dp))
-            Button(onClick={
+            Button(enabled=editable, onClick={
                 try {
                     val file=File(context.filesDir,"photos/${UUID.randomUUID()}.jpg").also {it.parentFile?.mkdirs();it.createNewFile()}
                     pendingPath=file.absolutePath
@@ -507,11 +561,12 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             }) {Text("Сфотографувати")}
         }
         Spacer(Modifier.height(12.dp))
-        StatusPicker(block.status) { update(currentBlock.copy(status = it)) }
+        StatusPicker(block.status, enabled = editable) { update(currentBlock.copy(status = it)) }
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value=block.description,
             onValueChange={text -> update(currentBlock.copy(description=text))},
+            enabled=editable,
             label={Text("Опис")},
             placeholder={Text("Наприклад: розміри, матеріал, колір — у довільній формі")},
             modifier=Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines=3
@@ -522,7 +577,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(14.dp)) {
                 repeat(3) {
                     Box(Modifier.weight(1f).height(200.dp).clip(RoundedCornerShape(14.dp))
-                        .background(CanvasColor).clickable(enabled=!importing) { gallery.launch("image/*") },
+                        .background(CanvasColor).clickable(enabled=editable && !importing) { gallery.launch("image/*") },
                         contentAlignment=Alignment.Center) {
                         Text("Додати фото", color=Muted)
                     }
@@ -546,6 +601,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
         OutlinedTextField(
             value=block.note,
             onValueChange={note -> update(currentBlock.copy(note=note))},
+            enabled=editable,
             label={Text("Примітка до виробу")},
             placeholder={Text("Примітка для всіх фото виробу")},
             modifier=Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines=3
@@ -581,7 +637,7 @@ internal fun PhotoImage(path: String, modifier: Modifier, maxDimension: Int = 16
 }
 
 @Composable
-private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (String) -> Unit, onDelete: () -> Unit) {
+private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (String) -> Unit, onDelete: () -> Unit, editable: Boolean = true) {
     val context=LocalContext.current
     val scope=rememberCoroutineScope()
     val replace by rememberUpdatedState(onReplace)
@@ -655,7 +711,7 @@ private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (Stri
                     drawLine(Color.White,Offset(size.width*.8f,size.height*.2f),Offset(size.width*.2f,size.height*.8f),3.dp.toPx(),StrokeCap.Round)
                 }
             }
-            Row(Modifier.align(Alignment.TopEnd).padding(12.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            if (editable) Row(Modifier.align(Alignment.TopEnd).padding(12.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 Box {
                     IconButton(onClick={chooseSource=true},enabled=!busy,
                         modifier=Modifier.background(Color.Black.copy(alpha=.7f),CircleShape).semantics {contentDescription="Змінити фото"}) {

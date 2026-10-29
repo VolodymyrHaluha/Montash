@@ -45,11 +45,11 @@ internal fun StatusBadge(status: WorkStatus) {
 }
 
 @Composable
-internal fun StatusPicker(status: WorkStatus, onChange: (WorkStatus) -> Unit) {
+internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, onChange: (WorkStatus) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val colors = status.tagColors()
     Box {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.testTag("product-status"),
+        OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.testTag("product-status"),
             shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, colors.border),
             colors = ButtonDefaults.outlinedButtonColors(containerColor = colors.background, contentColor = Color.White)) {
             Text("Статус: ${status.label}", color = Color.White)

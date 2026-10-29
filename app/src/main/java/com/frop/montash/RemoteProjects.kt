@@ -14,6 +14,7 @@ import java.io.File
 
 /** HTTP API access. All addresses and credentials are injected from the root .env at build time. */
 internal class RemoteProjects(context: Context) {
+    private class RevisionConflict(val currentRevision: Long) : IllegalStateException("Застаріла ревізія об’єкта")
     private val globalEndpoint = BuildConfig.MONTASH_GLOBAL_API_URL.trim().trimEnd('/')
     private val localEndpoint = BuildConfig.MONTASH_LOCAL_API_URL.trim().trimEnd('/')
     private val token = BuildConfig.MONTASH_CLIENT_API_TOKEN.trim()
@@ -63,7 +64,11 @@ internal class RemoteProjects(context: Context) {
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (status !in 200..299) {
-                val detail = runCatching { JSONObject(response).optString("error") }.getOrNull().orEmpty()
+                val errorBody = runCatching { JSONObject(response) }.getOrNull()
+                if (status == 409 && errorBody?.has("revision") == true) {
+                    throw RevisionConflict(errorBody.getLong("revision"))
+                }
+                val detail = errorBody?.optString("error").orEmpty()
                 throw IllegalStateException("Сервер повернув $status: $detail")
             }
             return JSONObject(response)
@@ -120,8 +125,9 @@ internal class RemoteProjects(context: Context) {
             val remote = (0 until array.length()).map { index ->
                 val value = array.getJSONObject(index)
                 val id = value.getString("id")
-                if (id !in pending) {
-                    preferences.edit().putLong("revision:${server.name}:$id", value.getLong("revision")).apply()
+                val revisionKey = "revision:${server.name}:$id"
+                if (id !in pending || !preferences.contains(revisionKey)) {
+                    preferences.edit().putLong(revisionKey, value.getLong("revision")).apply()
                 }
                 value.remove("revision")
                 value
@@ -173,10 +179,18 @@ internal class RemoteProjects(context: Context) {
             val endpoint = if (server == ServerConnection.LOCAL) localEndpoint else globalEndpoint
             for (id in pendingIds()) {
                 val project = store.load().firstOrNull { it.id == id } ?: continue
+                val revisionKey = "revision:${server.name}:$id"
                 val body = JSONArray(projectsToJson(listOf(project))).getJSONObject(0)
-                    .put("revision", preferences.getLong("revision:${server.name}:$id", 0L))
-                val result = request(endpoint, "PUT", "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}", body.toString())
-                preferences.edit().putLong("revision:${server.name}:$id", result.getLong("revision")).apply()
+                    .put("revision", preferences.getLong(revisionKey, 0L))
+                val path = "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}"
+                val result = try {
+                    request(endpoint, "PUT", path, body.toString())
+                } catch (conflict: RevisionConflict) {
+                    preferences.edit().putLong(revisionKey, conflict.currentRevision).apply()
+                    body.put("revision", conflict.currentRevision)
+                    request(endpoint, "PUT", path, body.toString())
+                }
+                preferences.edit().putLong(revisionKey, result.getLong("revision")).apply()
                 for (block in project.blocks) {
                     for (photo in block.photos) {
                         uploadFile(endpoint, server, id, block.id, "photo", photo.id, photo.path, "image/jpeg")
