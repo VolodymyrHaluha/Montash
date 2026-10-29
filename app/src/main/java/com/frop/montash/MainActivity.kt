@@ -18,8 +18,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.File
 import java.util.UUID
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
@@ -117,25 +115,16 @@ internal fun MontashApp() {
         }
     }
     LaunchedEffect(monitor) {
-        var checks = 0
-        while (isActive) {
-            val current = monitor.check()
-            val changed = current != serverConnection
-            serverConnection = current
-            if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
-                if (changed || checks % 6 == 0) {
-                    try {
-                        val refreshed = remote.refresh(store.load(), current)
-                        store.save(refreshed)
-                        projects = refreshed
-                        if (current == ServerConnection.GLOBAL || remote.globalHealthy()) remote.upload(store)
-                    } catch (error: Exception) {
-                        if (changed) localError(error)
-                    }
-                }
-            }
-            checks++
-            delay(5_000)
+        val current = monitor.check()
+        serverConnection = current
+        if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
+            try {
+                val refreshed = remote.refresh(store.load(), current)
+                store.save(refreshed)
+                projects = refreshed
+                remote.upload(store, current)
+                remote.uploadExistingMedia(store, current)
+            } catch (error: Exception) { localError(error) }
         }
     }
     fun sendProject(id: String) {
@@ -143,9 +132,13 @@ internal fun MontashApp() {
             try {
                 remote.markPending(id)
                 scope.launch {
-                    if (serverConnection == ServerConnection.GLOBAL || remote.globalHealthy()) {
-                        try { remote.upload(store) } catch (error: Exception) { localError(error) }
-                    }
+                    try {
+                        val current = monitor.check()
+                        serverConnection = current
+                        if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
+                            remote.upload(store, current)
+                        }
+                    } catch (error: Exception) { localError(error) }
                 }
             } catch (error: Exception) { localError(error) }
         }
