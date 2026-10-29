@@ -128,7 +128,7 @@ internal fun MontashApp() {
                         val refreshed = remote.refresh(store.load(), current)
                         store.save(refreshed)
                         projects = refreshed
-                        if (current == ServerConnection.GLOBAL || remote.globalHealthy()) remote.upload(store)
+                        remote.upload(store, current)
                     } catch (error: Exception) {
                         if (changed) localError(error)
                     }
@@ -143,8 +143,8 @@ internal fun MontashApp() {
             try {
                 remote.markPending(id)
                 scope.launch {
-                    if (serverConnection == ServerConnection.GLOBAL || remote.globalHealthy()) {
-                        try { remote.upload(store) } catch (error: Exception) { localError(error) }
+                    if (serverConnection == ServerConnection.LOCAL || serverConnection == ServerConnection.GLOBAL) {
+                        try { remote.upload(store, serverConnection) } catch (error: Exception) { localError(error) }
                     }
                 }
             } catch (error: Exception) { localError(error) }
