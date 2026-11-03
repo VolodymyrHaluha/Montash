@@ -419,7 +419,6 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     initialProductId: String? = null, backSignal: Int = 0) {
     var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
     var draft by remember(project.id) { mutableStateOf<WorkBlock?>(null) }
-    var editingSection by remember(project.id) { mutableStateOf<String?>(null) }
     var creating by remember(project.id) { mutableStateOf(false) }
     var viewingPhoto by remember { mutableStateOf<PhotoEntry?>(null) }
     var editingObject by remember { mutableStateOf(false) }
@@ -439,7 +438,6 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                 .filterNot { it in originalPaths }.forEach { File(it).delete() }
         }
         draft = null
-        editingSection = null
         pendingAddition = null
         viewingPhoto = null
         if (creating) productId = null
@@ -458,62 +456,61 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     }
     BackHandler(enabled = product != null) { leaveProduct() }
 
-    Column(Modifier.fillMaxSize().padding(28.dp, 20.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (product == null) {
-                BackButton(onBack)
-                Spacer(Modifier.width(14.dp))
-            }
-            if (product == null) Column(Modifier.weight(1f)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = if (product == null) 28.dp else 20.dp, vertical = 20.dp)) {
+        if (product == null) Row(verticalAlignment = Alignment.CenterVertically) {
+            BackButton(onBack)
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
                 Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
                 Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
-            } else Spacer(Modifier.weight(1f))
-            if (product == null) TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
+            }
+            TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
             Button(onClick = {
                 if (draft != null) cancelProduct()
                 val added = WorkBlock()
                 productId = added.id
                 draft = added
-                editingSection = null
                 creating = true
                 error = null
             }, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
         }
         error?.let { Text(it, color = Red) }
-        Spacer(Modifier.height(18.dp))
+        if (product == null) Spacer(Modifier.height(18.dp))
         if (product == null) {
             if (project.blocks.isEmpty()) Text("Додайте перший виріб до об'єкта.", color = Muted)
             ListSearch(productSearchText, { productSearchText = it }, { appliedProductSearch = productSearchText.trim() })
             Spacer(Modifier.height(16.dp))
             ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth(), appliedProductSearch)
         } else key(product.id) {
-            Column(Modifier.weight(1f).fillMaxWidth()) {
+            SurfaceCard(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
                     Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("product-details"),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
                     ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated },
-                        editableInfo = creating || editingSection == "info", editablePhotos = creating || editingSection == "photos",
-                        editableNote = creating || editingSection == "text", canEdit = draft == null,
-                        onEdit = { section -> draft = savedProduct?.copy(); editingSection = section; error = null },
+                        editableInfo = draft != null, editablePhotos = draft != null,
+                        editableNote = draft != null, canEdit = draft == null,
+                        onEdit = { _ -> draft = savedProduct?.copy(); error = null },
                         addition = pendingAddition, onAdditionHandled = { pendingAddition = null },
-                        activeAddition = if (creating) null else editingSection, canAdd = draft == null || creating, onAdd = { requested ->
-                            val section = when {
-                                requested == "camera" -> "photos"
-                                requested.startsWith("media-") -> "media"
-                                else -> requested
-                            }
+                        activeAddition = null, canAdd = true,
+                        onAddProduct = {
+                            if (draft != null) cancelProduct()
+                            val added = WorkBlock()
+                            productId = added.id
+                            draft = added
+                            creating = true
+                            error = null
+                        }, onAdd = { requested ->
                             if (draft == null) draft = savedProduct?.copy()
-                            if (section == "text") draft = draft?.copy(texts = draft!!.texts + TextEntry("", createdAt = System.currentTimeMillis()))
-                            editingSection = section
+                            if (requested == "text") draft = draft?.copy(texts = draft!!.texts + TextEntry("", createdAt = System.currentTimeMillis()))
                             pendingAddition = requested
                             error = null
                         })
                     ProductMedia(product, { updated -> if (draft?.id == updated.id) draft = updated }, { photo -> viewingPhoto = photo },
-                        editableMedia = creating || editingSection == "media", editableAudio = creating || editingSection == "audio",
-                        editableDocs = creating || editingSection == "documents", editablePhotos = creating || editingSection == "photos",
-                        editableText = creating || editingSection == "text", canEdit = draft == null,
-                        onEdit = { section -> draft = savedProduct?.copy(); editingSection = section; error = null },
+                        editableMedia = draft != null, editableAudio = draft != null,
+                        editableDocs = draft != null, editablePhotos = draft != null,
+                        editableText = draft != null, canEdit = draft == null,
+                        onEdit = { _ -> draft = savedProduct?.copy(); error = null },
                         addition = pendingAddition, onAdditionHandled = { pendingAddition = null })
                 }
                 Spacer(Modifier.height(12.dp))
@@ -531,7 +528,6 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                                     else project.blocks.map { if (it.id == changed.id) changed else it }
                                 onUpdate(project.copy(blocks = blocks))
                                 draft = null
-                                editingSection = null
                                 creating = false
                                 error = null
                             } catch (failure: Exception) {
@@ -544,7 +540,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         }
     }
     viewingPhoto?.let { photo ->
-        PhotoViewer(photo, onClose = { viewingPhoto = null }, editable = creating || editingSection == "photos",
+        PhotoViewer(photo, onClose = { viewingPhoto = null }, editable = draft != null,
             onReplace = { path ->
                 draft = draft?.copy(photos = draft!!.photos.map { if (it.id == photo.id) it.copy(path = path) else it })
                 viewingPhoto = viewingPhoto?.copy(path = path)
@@ -668,7 +664,8 @@ internal fun ProductEntryCard(title: String, date: Long?, canEdit: Boolean, onEd
 @Composable
 private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit,
     editableInfo: Boolean, editablePhotos: Boolean, editableNote: Boolean, canEdit: Boolean, onEdit: (String) -> Unit,
-    addition: String?, onAdditionHandled: () -> Unit, canAdd: Boolean, activeAddition: String?, onAdd: (String) -> Unit) {
+    addition: String?, onAdditionHandled: () -> Unit, canAdd: Boolean, activeAddition: String?,
+    onAddProduct: () -> Unit, onAdd: (String) -> Unit) {
     val context=LocalContext.current
     val currentBlock by rememberUpdatedState(block)
     val update by rememberUpdatedState(onUpdate)
@@ -726,27 +723,38 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             } catch (_: Exception) { pendingPath?.let { File(it).delete() }; pendingPath = null; error = "Камера недоступна." }
         } else if (addition == "text" && editableNote) onAdditionHandled()
     }
-    SurfaceCard(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Фото", Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
-            Text("Назва", Modifier.weight(2.6f), fontWeight = FontWeight.Bold)
-            Text("Опис", Modifier.weight(2f), fontWeight = FontWeight.Bold)
-            Text("Статус", Modifier.weight(1.8f), fontWeight = FontWeight.Bold)
-            if (canEdit) TextButton(onClick = { onEdit("info") }, modifier = Modifier.testTag("edit-product")) { Text("✎", fontSize = 24.sp) }
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1.5f).height(90.dp)) {
-                val first = block.photos.firstOrNull()
-                if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
-                else PhotoImage(first.path, Modifier.fillMaxSize().clickable { onPhoto(first) })
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        SurfaceCard(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Фото", Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
+                        Text("Назва", Modifier.weight(2.6f), fontWeight = FontWeight.Bold)
+                        Text("Опис", Modifier.weight(2f), fontWeight = FontWeight.Bold)
+                        Text("Статус", Modifier.weight(1.8f), fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.width(48.dp))
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1.5f).height(72.dp)) {
+                            val first = block.photos.firstOrNull()
+                            if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
+                            else PhotoImage(first.path, Modifier.fillMaxSize().clickable { onPhoto(first) })
+                        }
+                        if (editableInfo) OutlinedTextField(block.name, { update(currentBlock.copy(name = it)) }, modifier = Modifier.weight(2.6f).testTag("product-name").finishEditingOnOutsideTouch(), singleLine = true)
+                        else Text(block.name.ifBlank { "—" }, Modifier.weight(2.6f))
+                        if (editableInfo) OutlinedTextField(block.description, { update(currentBlock.copy(description = it)) }, modifier = Modifier.weight(2f).finishEditingOnOutsideTouch())
+                        else Text(block.description.ifBlank { "—" }, Modifier.weight(2f))
+                        Box(Modifier.weight(1.8f)) {
+                            if (editableInfo) StatusPicker(block.status) { update(currentBlock.copy(status = it)) } else StatusBadge(block.status)
+                        }
+                        Spacer(Modifier.width(48.dp))
+                    }
+                }
+                if (canEdit) TextButton(onClick = { onEdit("info") }, modifier = Modifier.align(Alignment.TopEnd).testTag("edit-product")) { Text("✎", fontSize = 24.sp) }
             }
-            if (editableInfo) OutlinedTextField(block.name, { update(currentBlock.copy(name = it)) }, modifier = Modifier.weight(2.6f).testTag("product-name").finishEditingOnOutsideTouch(), singleLine = true)
-            else Text(block.name.ifBlank { "Виріб без назви" }, Modifier.weight(2.6f))
-            if (editableInfo) OutlinedTextField(block.description, { update(currentBlock.copy(description = it)) }, modifier = Modifier.weight(2f).finishEditingOnOutsideTouch())
-            else Text(block.description.ifBlank { "—" }, Modifier.weight(2f))
-            Box(Modifier.weight(1.8f)) { if (editableInfo) StatusPicker(block.status) { update(currentBlock.copy(status = it)) } else StatusBadge(block.status) }
         }
+        Button(onClick = onAddProduct, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
     }
     ProductAdditions(enabled = canAdd, activeSection = activeAddition, onAdd = onAdd)
     if (importing) LinearProgressIndicator(Modifier.fillMaxWidth())

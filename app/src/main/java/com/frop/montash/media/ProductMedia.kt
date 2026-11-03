@@ -331,9 +331,13 @@ private fun AudioControls(entry: MediaEntry, onDelete: (() -> Unit)?) {
     LaunchedEffect(player, playing) {
         while (playing) { position = player?.currentPosition?.toFloat() ?: 0f; delay(250) }
     }
-    Column {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+    ) { Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(entry.name, Modifier.widthIn(max = 130.dp), maxLines = 1)
             TextButton(onClick = {
                 try {
                     val active = player ?: MediaPlayer().apply {
@@ -356,7 +360,7 @@ private fun AudioControls(entry: MediaEntry, onDelete: (() -> Unit)?) {
             if (onDelete != null) TextButton(onClick = onDelete) { Text("✕") }
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    }
+    } }
 }
 
 @Composable
