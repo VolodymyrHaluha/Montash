@@ -1,10 +1,43 @@
 package com.frop.montash
 
+import com.frop.montash.data.projectsFromJson
+import com.frop.montash.data.projectsToJson
+
 import org.json.JSONArray
 import org.junit.Assert.*
 import org.junit.Test
 
 class ProjectDataTest {
+    @Test fun contentGroupsUseNewestItemAndMoveEditedGroupToTop() {
+        val block = WorkBlock(
+            photos = listOf(PhotoEntry("/photo.jpg", "photo", 100L)),
+            media = listOf(MediaEntry("/first.jpg", "Перше", "image/jpeg", "first", 200L),
+                MediaEntry("/second.mp4", "Друге", "video/mp4", "second", 300L)),
+            texts = listOf(TextEntry("Текст", "text", 150L))
+        )
+        assertEquals(listOf("media", "text", "photos"), block.contentGroups().map { it.section })
+        assertEquals(300L, block.contentGroups().first().updatedAt)
+        val edited = block.copy(history = listOf(ProductChange("photos", "Замінено фото", 400L)))
+        assertEquals("photos", edited.contentGroups().first().section)
+        assertEquals(400L, edited.contentGroups().first().updatedAt)
+    }
+    @Test fun additionHistorySurvivesSaveReload() {
+        val original = WorkBlock(id = "product")
+        val changed = original.copy(
+            name = "Шафа",
+            photos = listOf(PhotoEntry("/private/photo.jpg", "photo", 1_700_000_000_000L)),
+            note = "Розміри уточнено",
+            texts = listOf(TextEntry("Окремий запис", "text", 1_700_000_001_000L)),
+            media = listOf(MediaEntry("/private/manual.pdf", "Інструкція.pdf", "application/pdf", "document", 1_700_000_002_000L))
+        ).withRecordedChanges(original)
+        assertEquals(setOf("info", "photos", "text", "documents"), changed.history.map { it.section }.toSet())
+        val restored = projectsFromJson(projectsToJson(listOf(Project("Об'єкт", "Клієнт", blocks = listOf(changed)))))
+            .single().blocks.single()
+        assertEquals(changed.history, restored.history)
+        assertEquals(changed.media, restored.media)
+        assertEquals(changed.texts, restored.texts)
+        assertEquals(changed.photos, restored.photos)
+    }
     @Test fun projectStatusUsesMostCommonProductStatus() {
         val products = listOf(WorkStatus.DONE, WorkStatus.DONE, WorkStatus.DRAFT, WorkStatus.IN_PROGRESS, WorkStatus.DONE).map { WorkBlock(status = it) }
         assertEquals(WorkStatus.DONE, aggregateStatus(products))

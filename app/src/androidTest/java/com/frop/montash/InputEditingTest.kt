@@ -1,5 +1,8 @@
 package com.frop.montash
 
+import com.frop.montash.ui.components.finishEditingOnOutsideTouch
+import com.frop.montash.ui.components.dismissInputOnOutsideTouch
+
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
