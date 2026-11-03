@@ -1,6 +1,7 @@
 package com.frop.montash
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,18 +11,49 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+
+private enum class SortDirection { DESCENDING, ASCENDING }
 
 @Composable
-private fun TableLayout(headers: List<Pair<String, Float>>, modifier: Modifier, rows: LazyListScope.() -> Unit) {
+private fun TableLayout(headers: List<Pair<String, Float>>, modifier: Modifier,
+    sortColumn: Int?, sortDirection: SortDirection?, onSort: (Int) -> Unit,
+    rows: LazyListScope.() -> Unit) {
     Column(modifier) {
         Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
-            headers.forEach { (title, weight) -> Text(title, Modifier.weight(weight).padding(horizontal = 8.dp), fontWeight = FontWeight.Bold) }
+            headers.forEachIndexed { index, (title, weight) ->
+                val direction = if (sortColumn == index) sortDirection else null
+                Row(Modifier.weight(weight).clickable { onSort(index) }
+                    .semantics { contentDescription = "$title: " + when (direction) {
+                        SortDirection.DESCENDING -> "від найбільшого до найменшого"
+                        SortDirection.ASCENDING -> "від найменшого до найбільшого"
+                        null -> "без сортування"
+                    } }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+                    if (direction != null) {
+                        Spacer(Modifier.width(5.dp))
+                        val color = MaterialTheme.colorScheme.primary
+                        Canvas(Modifier.size(12.dp)) {
+                            val top = if (direction == SortDirection.ASCENDING) .7f else .3f
+                            val tip = if (direction == SortDirection.ASCENDING) .3f else .7f
+                            drawLine(color, Offset(size.width * .15f, size.height * top),
+                                Offset(size.width * .5f, size.height * tip), 2.dp.toPx(), cap = StrokeCap.Round)
+                            drawLine(color, Offset(size.width * .5f, size.height * tip),
+                                Offset(size.width * .85f, size.height * top), 2.dp.toPx(), cap = StrokeCap.Round)
+                        }
+                    }
+                }
+            }
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f), content = rows)
     }
@@ -52,7 +84,7 @@ internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, onChange:
         OutlinedButton(onClick = { expanded = true }, enabled = enabled, modifier = Modifier.testTag("product-status"),
             shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, colors.border),
             colors = ButtonDefaults.outlinedButtonColors(containerColor = colors.background, contentColor = Color.White)) {
-            Text("Статус: ${status.label}", color = Color.White)
+            Text(status.label, color = Color.White)
         }
         DropdownMenu(expanded, { expanded = false }) {
             WorkStatus.entries.forEach { value ->
@@ -62,10 +94,33 @@ internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, onChange:
     }
 }
 @Composable
-internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, modifier: Modifier = Modifier) {
-    TableLayout(listOf("Назва" to 2.6f, "Опис" to 2f, "К-сть виробів" to 1.3f, "Статус" to 1.8f), modifier.testTag("objects-table")) {
-        if (projects.isEmpty()) item { Text("Об'єктів поки немає", Modifier.padding(20.dp)) }
-        items(projects, key = { it.id }) { p ->
+internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+    var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
+    var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
+    fun changeSort(index: Int) {
+        if (sortColumn != index) { sortColumn = index; sortDirection = SortDirection.DESCENDING }
+        else when (sortDirection) {
+            SortDirection.DESCENDING -> sortDirection = SortDirection.ASCENDING
+            SortDirection.ASCENDING -> { sortColumn = null; sortDirection = null }
+            null -> sortDirection = SortDirection.DESCENDING
+        }
+    }
+    val filteredProjects = projects.filter { project ->
+        query.isBlank() || listOf(project.displayName, project.customer, project.description).any { it.contains(query, ignoreCase = true) }
+    }
+    val visibleProjects = if (sortColumn == null) filteredProjects else {
+        val comparator = when (sortColumn) {
+            0 -> compareBy<Project> { it.displayName.lowercase() }
+            1 -> compareBy { it.description.lowercase() }
+            2 -> compareBy { it.blocks.size }
+            else -> compareBy { it.status.ordinal }
+        }
+        filteredProjects.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
+    }
+    TableLayout(listOf("Назва" to 2.6f, "Опис" to 2f, "К-сть виробів" to 1.3f, "Статус" to 1.8f),
+        modifier.testTag("objects-table"), sortColumn, sortDirection, ::changeSort) {
+        if (visibleProjects.isEmpty()) item { Text(if (query.isBlank()) "Об'єктів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
+        items(visibleProjects, key = { it.id }) { p ->
             Row(Modifier.fillMaxWidth().clickable { onOpen(p) }.testTag("object-${p.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(p.displayName, Modifier.weight(2.6f).padding(8.dp), fontWeight = FontWeight.SemiBold)
                 Text(p.description.ifBlank { "—" }, Modifier.weight(2f).padding(8.dp), softWrap = true)
@@ -77,10 +132,32 @@ internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, mo
     }
 }
 @Composable
-internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock) -> Unit, modifier: Modifier = Modifier) {
-    val products = projects.flatMap { p -> p.blocks.map { p to it } }
-    TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f, "Опис" to 2f, "Статус" to 1.8f), modifier.testTag("object-products")) {
-        if (products.isEmpty()) item { Text("Виробів поки немає", Modifier.padding(20.dp)) }
+internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+    var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
+    var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
+    fun changeSort(index: Int) {
+        if (sortColumn != index) { sortColumn = index; sortDirection = SortDirection.DESCENDING }
+        else when (sortDirection) {
+            SortDirection.DESCENDING -> sortDirection = SortDirection.ASCENDING
+            SortDirection.ASCENDING -> { sortColumn = null; sortDirection = null }
+            null -> sortDirection = SortDirection.DESCENDING
+        }
+    }
+    val filteredProducts = projects.flatMap { p -> p.blocks.map { p to it } }.filter { (project, block) ->
+        query.isBlank() || listOf(block.name, block.description, block.note, project.displayName).any { it.contains(query, ignoreCase = true) }
+    }
+    val products = if (sortColumn == null) filteredProducts else {
+        val comparator = when (sortColumn) {
+            0 -> compareBy<Pair<Project, WorkBlock>> { it.second.photos.size }
+            1 -> compareBy { it.second.name.lowercase() }
+            2 -> compareBy { it.second.description.lowercase() }
+            else -> compareBy { it.second.status.ordinal }
+        }
+        filteredProducts.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
+    }
+    TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f, "Опис" to 2f, "Статус" to 1.8f),
+        modifier.testTag("object-products"), sortColumn, sortDirection, ::changeSort) {
+        if (products.isEmpty()) item { Text(if (query.isBlank()) "Виробів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
         items(products, key = { "${it.first.id}/${it.second.id}" }) { (p, b) ->
             Row(Modifier.fillMaxWidth().clickable { onOpen(p, b) }.testTag("product-${b.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1.5f).padding(8.dp)) { ProductThumbnail(b, Modifier.fillMaxWidth().height(80.dp)) }

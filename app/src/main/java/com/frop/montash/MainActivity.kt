@@ -205,9 +205,13 @@ internal fun MontashApp() {
                         open(project)
                     }
                     Screen.PRODUCTS -> Column(Modifier.fillMaxSize().padding(28.dp, 22.dp)) {
+                        var searchText by rememberSaveable { mutableStateOf("") }
+                        var appliedSearch by rememberSaveable { mutableStateOf("") }
                         PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}")
-                        Spacer(Modifier.height(20.dp))
-                        ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth())
+                        Spacer(Modifier.height(12.dp))
+                        ListSearch(searchText, { searchText = it }, { appliedSearch = searchText.trim() })
+                        Spacer(Modifier.height(16.dp))
+                        ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
                     }
                     Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
                         key(project.id) {
@@ -277,6 +281,26 @@ private fun PageHeader(title: String, subtitle: String, action: (@Composable () 
 }
 
 @Composable
+private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: () -> Unit) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Row(Modifier.widthIn(max = 540.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(value, onValueChange, modifier = Modifier.weight(1f).testTag("list-search-input"),
+                placeholder = { Text("Пошук...") }, singleLine = true,
+                shape = RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
+            Button(onClick = onApply, modifier = Modifier.height(56.dp).testTag("list-search-apply"),
+                shape = RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp)) {
+                Canvas(Modifier.size(22.dp)) {
+                    drawCircle(CanvasColor, radius = size.minDimension * .28f,
+                        center = Offset(size.width * .42f, size.height * .42f), style = Stroke(2.4.dp.toPx()))
+                    drawLine(CanvasColor, Offset(size.width * .62f, size.height * .62f),
+                        Offset(size.width * .88f, size.height * .88f), strokeWidth = 2.4.dp.toPx(), cap = StrokeCap.Round)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun HomeScreen(projects: List<Project>, connection: ServerConnection, onProject: (Project) -> Unit, onObjects: () -> Unit) {
     var visibleProjectCount by rememberSaveable { mutableIntStateOf(5) }
     val visibleProjects = projects.take(visibleProjectCount)
@@ -332,6 +356,8 @@ private fun HomeScreen(projects: List<Project>, connection: ServerConnection, on
 
 @Composable
 private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddClient: (String) -> Client?, onProject: (Project) -> Unit, onCreate: (Project) -> Unit) {
+    var searchText by rememberSaveable { mutableStateOf("") }
+    var appliedSearch by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var objectName by rememberSaveable { mutableStateOf("") }
     var objectDescription by rememberSaveable { mutableStateOf("") }
@@ -343,9 +369,11 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
         PageHeader("Об'єкти", "Всього: ${projects.size}") {
             Button(onClick={ objectName="";objectDescription="";customer="";chosenClientId=null;creating=true }) { Text("Створити об'єкт") }
         }
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(12.dp))
+        ListSearch(searchText, { searchText = it }, { appliedSearch = searchText.trim() })
+        Spacer(Modifier.height(16.dp))
         if (projects.isEmpty()) Text("Створіть перший об'єкт: вкажіть замовника.", color=Muted)
-        ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth())
+        ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
     }
     if (creating) AlertDialog(
         modifier=Modifier.dismissInputOnOutsideTouch(),
@@ -383,10 +411,13 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
 internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onUpdate: (Project) -> Unit, initialProductId: String? = null) {
     var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
     var draft by remember(project.id) { mutableStateOf<WorkBlock?>(null) }
+    var editingSection by remember(project.id) { mutableStateOf<String?>(null) }
     var creating by remember(project.id) { mutableStateOf(false) }
     var viewingPhoto by remember { mutableStateOf<PhotoEntry?>(null) }
     var editingObject by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var productSearchText by rememberSaveable(project.id) { mutableStateOf("") }
+    var appliedProductSearch by rememberSaveable(project.id) { mutableStateOf("") }
     val savedProduct = project.blocks.find { it.id == productId }
     val product = draft ?: savedProduct
 
@@ -399,6 +430,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                 .filterNot { it in originalPaths }.forEach { File(it).delete() }
         }
         draft = null
+        editingSection = null
         viewingPhoto = null
         if (creating) productId = null
         creating = false
@@ -413,16 +445,17 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         Row(verticalAlignment = Alignment.CenterVertically) {
             BackButton { if (product != null) leaveProduct() else onBack() }
             Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
+            if (product == null) Column(Modifier.weight(1f)) {
                 Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
                 Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
-            }
-            TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
+            } else Spacer(Modifier.weight(1f))
+            if (product == null) TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
             Button(onClick = {
                 if (draft != null) cancelProduct()
                 val added = WorkBlock()
                 productId = added.id
                 draft = added
+                editingSection = null
                 creating = true
                 error = null
             }, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
@@ -431,7 +464,9 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         Spacer(Modifier.height(18.dp))
         if (product == null) {
             if (project.blocks.isEmpty()) Text("Додайте перший виріб до об'єкта.", color = Muted)
-            ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth())
+            ListSearch(productSearchText, { productSearchText = it }, { appliedProductSearch = productSearchText.trim() })
+            Spacer(Modifier.height(16.dp))
+            ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth(), appliedProductSearch)
         } else key(product.id) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 TextButton(onClick = ::leaveProduct) { Text("До списку виробів") }
@@ -439,15 +474,17 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                     Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("product-details"),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated }, editable = draft != null)
-                    ProductMedia(product, { updated -> if (draft?.id == updated.id) draft = updated }, editable = draft != null)
+                    ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated },
+                        editableInfo = creating || editingSection == "info", editablePhotos = creating || editingSection == "photos",
+                        editableNote = creating || editingSection == "note", canEdit = draft == null,
+                        onEdit = { section -> draft = savedProduct?.copy(); editingSection = section; error = null })
+                    ProductMedia(product, { updated -> if (draft?.id == updated.id) draft = updated },
+                        editableMedia = creating || editingSection == "media", editableAudio = creating || editingSection == "audio",
+                        canEdit = draft == null,
+                        onEdit = { section -> draft = savedProduct?.copy(); editingSection = section; error = null })
                 }
                 Spacer(Modifier.height(12.dp))
-                if (draft == null) {
-                    Button(onClick = { draft = savedProduct?.copy(); error = null }, modifier = Modifier.testTag("edit-product")) {
-                        Text("Редагувати")
-                    }
-                } else {
+                if (draft != null) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedButton(onClick = ::cancelProduct, modifier = Modifier.testTag("cancel-product")) {
                             Text("Скасувати")
@@ -459,6 +496,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                                     else project.blocks.map { if (it.id == changed.id) changed else it }
                                 onUpdate(project.copy(blocks = blocks))
                                 draft = null
+                                editingSection = null
                                 creating = false
                                 error = null
                             } catch (failure: Exception) {
@@ -471,7 +509,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         }
     }
     viewingPhoto?.let { photo ->
-        PhotoViewer(photo, onClose = { viewingPhoto = null }, editable = draft != null,
+        PhotoViewer(photo, onClose = { viewingPhoto = null }, editable = creating || editingSection == "photos",
             onReplace = { path ->
                 draft = draft?.copy(photos = draft!!.photos.map { if (it.id == photo.id) it.copy(path = path) else it })
                 viewingPhoto = viewingPhoto?.copy(path = path)
@@ -493,7 +531,8 @@ internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit, editable: Boolean) {
+private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit,
+    editableInfo: Boolean, editablePhotos: Boolean, editableNote: Boolean, canEdit: Boolean, onEdit: (String) -> Unit) {
     val context=LocalContext.current
     val currentBlock by rememberUpdatedState(block)
     val update by rememberUpdatedState(onUpdate)
@@ -503,7 +542,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
     val scope=rememberCoroutineScope()
     val camera=rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         pendingPath?.let {path ->
-            if(success && editable) update(currentBlock.copy(photos=currentBlock.photos+PhotoEntry(path))) else File(path).delete()
+            if(success && editablePhotos) update(currentBlock.copy(photos=currentBlock.photos+PhotoEntry(path))) else File(path).delete()
         }
         pendingPath=null
     }
@@ -530,7 +569,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                             }
                         }
                     }
-                    if(imported.isNotEmpty() && editable) update(currentBlock.copy(photos=currentBlock.photos+imported))
+                    if(imported.isNotEmpty() && editablePhotos) update(currentBlock.copy(photos=currentBlock.photos+imported))
                     if(imported.size<uris.size) error="Не вдалося додати ${uris.size-imported.size} фото. Спробуйте ще раз."
                 } finally {
                     importing=false
@@ -539,73 +578,68 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
         }
     }
     SurfaceCard(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment=Alignment.CenterVertically) {
-            OutlinedTextField(
-                value=block.name,
-                onValueChange={name -> update(currentBlock.copy(name=name))},
-                enabled=editable,
-                label={Text("Назва виробу")},
-                placeholder={Text("Наприклад, шафа")},
-                singleLine=true,
-                modifier=Modifier.weight(1f).testTag("product-name").finishEditingOnOutsideTouch()
-            )
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(enabled=editable && !importing, onClick={gallery.launch("image/*")}) {Text(if(importing) "Додаємо фото…" else "Додати фото")}
-            Spacer(Modifier.width(10.dp))
-            Button(enabled=editable, onClick={
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Фото", Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
+            Text("Назва", Modifier.weight(2.6f), fontWeight = FontWeight.Bold)
+            Text("Опис", Modifier.weight(2f), fontWeight = FontWeight.Bold)
+            Text("Статус", Modifier.weight(1.8f), fontWeight = FontWeight.Bold)
+            if (canEdit) TextButton(onClick = { onEdit("info") }, modifier = Modifier.testTag("edit-product")) { Text("✎", fontSize = 24.sp) }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1.5f).height(90.dp)) {
+                val first = block.photos.firstOrNull()
+                if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
+                else PhotoImage(first.path, Modifier.fillMaxSize().clickable { onPhoto(first) })
+            }
+            if (editableInfo) OutlinedTextField(block.name, { update(currentBlock.copy(name = it)) }, modifier = Modifier.weight(2.6f).testTag("product-name").finishEditingOnOutsideTouch(), singleLine = true)
+            else Text(block.name.ifBlank { "Виріб без назви" }, Modifier.weight(2.6f))
+            if (editableInfo) OutlinedTextField(block.description, { update(currentBlock.copy(description = it)) }, modifier = Modifier.weight(2f).finishEditingOnOutsideTouch())
+            else Text(block.description.ifBlank { "—" }, Modifier.weight(2f))
+            Box(Modifier.weight(1.8f)) { if (editableInfo) StatusPicker(block.status) { update(currentBlock.copy(status = it)) } else StatusBadge(block.status) }
+        }
+    }
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Фото виробу", Modifier.weight(1f), fontWeight = FontWeight.Bold)
+            if (canEdit) TextButton(onClick = { onEdit("photos") }) { Text("✎", fontSize = 24.sp) }
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(enabled = editablePhotos && !importing, onClick = { gallery.launch("image/*") }) { Text(if (importing) "Додаємо…" else "＋ Фото") }
+            Button(enabled = editablePhotos, onClick = {
                 try {
-                    val file=File(context.filesDir,"photos/${UUID.randomUUID()}.jpg").also {it.parentFile?.mkdirs();it.createNewFile()}
-                    pendingPath=file.absolutePath
-                    camera.launch(FileProvider.getUriForFile(context,"${context.packageName}.photos",file))
-                } catch(_: Exception) {pendingPath?.let {File(it).delete()};pendingPath=null;error="Камера недоступна. Додайте фото з галереї."}
-            }) {Text("Сфотографувати")}
+                    val file = File(context.filesDir, "photos/${UUID.randomUUID()}.jpg").also { it.parentFile?.mkdirs(); it.createNewFile() }
+                    pendingPath = file.absolutePath
+                    camera.launch(FileProvider.getUriForFile(context, "${context.packageName}.photos", file))
+                } catch (_: Exception) { pendingPath?.let { File(it).delete() }; pendingPath = null; error = "Камера недоступна." }
+            }) { Text("📷 ＋") }
         }
+        error?.let { Text(it, color = Red) }
         Spacer(Modifier.height(12.dp))
-        StatusPicker(block.status, enabled = editable) { update(currentBlock.copy(status = it)) }
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value=block.description,
-            onValueChange={text -> update(currentBlock.copy(description=text))},
-            enabled=editable,
-            label={Text("Опис")},
-            placeholder={Text("Наприклад: розміри, матеріал, колір — у довільній формі")},
-            modifier=Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines=3
-        )
-        error?.let {Text(it,color=Red)}
-        Spacer(Modifier.height(12.dp))
-        if(block.photos.isEmpty()) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(14.dp)) {
-                repeat(3) {
-                    Box(Modifier.weight(1f).height(200.dp).clip(RoundedCornerShape(14.dp))
-                        .background(CanvasColor).clickable(enabled=editable && !importing) { gallery.launch("image/*") },
-                        contentAlignment=Alignment.Center) {
-                        Text("Додати фото", color=Muted)
-                    }
+        val tiles = block.photos.size + if (editablePhotos) 1 else 0
+        (0 until tiles).toList().chunked(3).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                row.forEach { index ->
+                    if (index < block.photos.size) {
+                        val photo = block.photos[index]
+                        Box(Modifier.weight(1f).clickable { onPhoto(photo) }) { PhotoPreview(photo.path, 160.dp) }
+                    } else Box(Modifier.weight(1f).height(160.dp).clip(RoundedCornerShape(14.dp)).background(CanvasColor)
+                        .clickable { gallery.launch("image/*") }, contentAlignment = Alignment.Center) { Text("＋ Фото", color = Muted) }
                 }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
             }
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(12.dp))
         }
-        block.photos.chunked(3).forEach { rowPhotos ->
-            Row(Modifier.fillMaxWidth(), horizontalArrangement=Arrangement.spacedBy(14.dp)) {
-                rowPhotos.forEach {photo ->
-                    key(photo.id) {
-                        Box(Modifier.weight(1f).clickable {onPhoto(photo)}) {
-                            PhotoPreview(photo.path,height=200.dp)
-                        }
-                    }
-                }
-                repeat(3-rowPhotos.size) { Spacer(Modifier.weight(1f)) }
-            }
-            Spacer(Modifier.height(18.dp))
+    }
+    SurfaceCard(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Примітка до виробу", Modifier.weight(1f), fontWeight = FontWeight.Bold)
+            if (canEdit) TextButton(onClick = { onEdit("note") }) { Text("✎", fontSize = 24.sp) }
         }
-        OutlinedTextField(
-            value=block.note,
-            onValueChange={note -> update(currentBlock.copy(note=note))},
-            enabled=editable,
-            label={Text("Примітка до виробу")},
-            placeholder={Text("Примітка для всіх фото виробу")},
-            modifier=Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines=3
-        )
+        if (editableNote) OutlinedTextField(block.note, { update(currentBlock.copy(note = it)) },
+            modifier = Modifier.fillMaxWidth().finishEditingOnOutsideTouch(), minLines = 3)
+        else Text(block.note.ifBlank { "—" })
     }
 }
 
