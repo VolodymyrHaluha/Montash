@@ -9,6 +9,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,6 +34,25 @@ import java.io.File
 import java.util.UUID
 
 private enum class SortDirection { DESCENDING, ASCENDING }
+
+@Composable
+private fun CompactSortBar(labels: List<String>, sortColumn: Int?, sortDirection: SortDirection?,
+    onSort: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Сортування:", style = MaterialTheme.typography.labelLarge)
+        labels.forEachIndexed { index, label ->
+            val direction = if (sortColumn == index) sortDirection else null
+            FilterChip(selected = sortColumn == index, onClick = { onSort(index) },
+                modifier = Modifier.semantics { contentDescription = "$label: " + when (direction) {
+                    SortDirection.DESCENDING -> "від найбільшого до найменшого"
+                    SortDirection.ASCENDING -> "від найменшого до найбільшого"
+                    null -> "без сортування"
+                } },
+                label = { Text(label, maxLines = 1) })
+        }
+    }
+}
 
 @Composable
 private fun TableLayout(headers: List<Pair<String, Float>>, modifier: Modifier,
@@ -107,6 +128,7 @@ internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, onChange:
 }
 @Composable
 internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+    val compact = isCompactLayout()
     var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
     var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
     fun changeSort(index: Int) {
@@ -131,22 +153,51 @@ internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, mo
             filteredProjects.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
         }
     }
-    TableLayout(listOf("Назва" to 2.6f, "Опис" to 2f, "К-сть виробів" to 1.3f, "Статус" to 1.8f),
-        modifier.testTag("objects-table"), sortColumn, sortDirection, ::changeSort) {
-        if (visibleProjects.isEmpty()) item { Text(if (query.isBlank()) "Об'єктів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
-        items(visibleProjects, key = { it.id }) { p ->
-            Row(Modifier.fillMaxWidth().clickable { onOpen(p) }.testTag("object-${p.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.displayName, Modifier.weight(2.6f).padding(8.dp), fontWeight = FontWeight.SemiBold)
-                Text(p.description.ifBlank { "—" }, Modifier.weight(2f).padding(8.dp), softWrap = true)
-                Text(p.blocks.size.toString(), Modifier.weight(1.3f).padding(8.dp))
-                Box(Modifier.weight(1.8f).padding(8.dp)) { StatusBadge(p.status) }
+    if (compact) {
+        Column(modifier.testTag("objects-table")) {
+            CompactSortBar(listOf("Назва", "Опис", "Кількість", "Статус"),
+                sortColumn, sortDirection, ::changeSort)
+            LazyColumn(Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (visibleProjects.isEmpty()) item { Text(if (query.isBlank()) "Об'єктів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
+                items(visibleProjects, key = { it.id }) { p ->
+                    Surface(Modifier.fillMaxWidth().clickable { onOpen(p) }
+                        .testTag("object-${p.id}"), shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(p.displayName, fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium)
+                            if (p.description.isNotBlank()) Text(p.description)
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Виробів: ${p.blocks.size}", Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall)
+                                StatusBadge(p.status)
+                            }
+                        }
+                    }
+                }
             }
-            HorizontalDivider()
+        }
+    } else {
+        TableLayout(listOf("Назва" to 2.6f, "Опис" to 2f, "К-сть виробів" to 1.3f, "Статус" to 1.8f),
+            modifier.testTag("objects-table"), sortColumn, sortDirection, ::changeSort) {
+            if (visibleProjects.isEmpty()) item { Text(if (query.isBlank()) "Об'єктів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
+            items(visibleProjects, key = { it.id }) { p ->
+                Row(Modifier.fillMaxWidth().clickable { onOpen(p) }.testTag("object-${p.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(p.displayName, Modifier.weight(2.6f).padding(8.dp), fontWeight = FontWeight.SemiBold)
+                    Text(p.description.ifBlank { "—" }, Modifier.weight(2f).padding(8.dp), softWrap = true)
+                    Text(p.blocks.size.toString(), Modifier.weight(1.3f).padding(8.dp))
+                    Box(Modifier.weight(1.8f).padding(8.dp)) { StatusBadge(p.status) }
+                }
+                HorizontalDivider()
+            }
         }
     }
 }
 @Composable
 internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+    val compact = isCompactLayout()
     var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
     var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
     fun changeSort(index: Int) {
@@ -171,20 +222,46 @@ internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock)
             filteredProducts.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
         }
     }
-    TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f, "Опис" to 2f, "Статус" to 1.8f),
-        modifier.testTag("object-products"), sortColumn, sortDirection, ::changeSort) {
-        if (products.isEmpty()) item { Text(if (query.isBlank()) "Виробів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
-        items(products, key = { "${it.first.id}/${it.second.id}" }) { (p, b) ->
-            Row(Modifier.fillMaxWidth().clickable { onOpen(p, b) }.testTag("product-${b.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1.5f).padding(8.dp)) { ProductThumbnail(b, Modifier.fillMaxWidth().height(80.dp)) }
-                Column(Modifier.weight(2.6f).padding(8.dp)) {
-                    Text(b.name.ifBlank { "Виріб без назви" }, fontWeight = FontWeight.SemiBold)
-                    if (projects.size > 1) Text(p.displayName, style = MaterialTheme.typography.bodySmall)
+    if (compact) {
+        Column(modifier.testTag("object-products")) {
+            CompactSortBar(listOf("Фото", "Назва", "Опис", "Статус"),
+                sortColumn, sortDirection, ::changeSort)
+            LazyColumn(Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (products.isEmpty()) item { Text(if (query.isBlank()) "Виробів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
+                items(products, key = { "${it.first.id}/${it.second.id}" }) { (p, b) ->
+                    Surface(Modifier.fillMaxWidth().clickable { onOpen(p, b) }
+                        .testTag("product-${b.id}"), shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ProductThumbnail(b, Modifier.fillMaxWidth().height(150.dp))
+                            Text(b.name.ifBlank { "Виріб без назви" }, fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.titleMedium)
+                            if (projects.size > 1) Text(p.displayName, style = MaterialTheme.typography.bodySmall)
+                            if (b.description.isNotBlank()) Text(b.description)
+                            StatusBadge(b.status)
+                        }
+                    }
                 }
-                Text(b.description.ifBlank { "—" }, Modifier.weight(2f).padding(8.dp), softWrap = true)
-                Box(Modifier.weight(1.8f).padding(8.dp)) { StatusBadge(b.status) }
             }
-            HorizontalDivider()
+        }
+    } else {
+        TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f, "Опис" to 2f, "Статус" to 1.8f),
+            modifier.testTag("object-products"), sortColumn, sortDirection, ::changeSort) {
+            if (products.isEmpty()) item { Text(if (query.isBlank()) "Виробів поки немає" else "За запитом нічого не знайдено", Modifier.padding(20.dp)) }
+            items(products, key = { "${it.first.id}/${it.second.id}" }) { (p, b) ->
+                Row(Modifier.fillMaxWidth().clickable { onOpen(p, b) }.testTag("product-${b.id}").padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1.5f).padding(8.dp)) { ProductThumbnail(b, Modifier.fillMaxWidth().height(80.dp)) }
+                    Column(Modifier.weight(2.6f).padding(8.dp)) {
+                        Text(b.name.ifBlank { "Виріб без назви" }, fontWeight = FontWeight.SemiBold)
+                        if (projects.size > 1) Text(p.displayName, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text(b.description.ifBlank { "—" }, Modifier.weight(2f).padding(8.dp), softWrap = true)
+                    Box(Modifier.weight(1.8f).padding(8.dp)) { StatusBadge(b.status) }
+                }
+                HorizontalDivider()
+            }
         }
     }
 }
@@ -198,6 +275,7 @@ private fun ProductThumbnail(block: WorkBlock, modifier: Modifier) {
 @Composable
 internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: () -> Unit,
     onSave: (Project) -> Unit) {
+    val compact = isCompactLayout()
     var draft by remember(project.id) { mutableStateOf(project.copy()) }
     var sortColumn by rememberSaveable(project.id) { mutableStateOf<Int?>(null) }
     var sortDirection by rememberSaveable(project.id) { mutableStateOf<SortDirection?>(null) }
@@ -219,6 +297,13 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
             SortDirection.ASCENDING -> { sortColumn = null; sortDirection = null }
             null -> sortDirection = SortDirection.DESCENDING
         }
+    }
+    fun saveChanges() {
+        val name = draft.displayName.trim()
+        val recordedBlocks = draft.blocks.map { current ->
+            current.withRecordedChanges(project.blocks.firstOrNull { it.id == current.id })
+        }
+        onSave(draft.copy(name = name, customer = name, blocks = recordedBlocks))
     }
 
     fun updateProduct(id: String, transform: (WorkBlock) -> WorkBlock) {
@@ -276,32 +361,58 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
     )) {
         SurfaceCard(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)
             .testTag("object-edit-dialog")) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Редагування об'єкта", style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                TextButton(onClick = { confirmDelete = true }, enabled = !photoBusy,
-                    modifier = Modifier.testTag("delete-object")) {
-                    Text("Видалити об’єкт", color = MaterialTheme.colorScheme.error)
-                }
-                Spacer(Modifier.width(8.dp))
-                IconButton(onClick = ::discardAndClose, enabled = !photoBusy,
-                    modifier = Modifier.semantics { contentDescription = "Скасувати" }) {
-                    EditActionGlyph("xmark")
-                }
-                Spacer(Modifier.width(8.dp))
-                IconButton(enabled = draft.displayName.isNotBlank() && !photoBusy, onClick = {
-                    val name = draft.displayName.trim()
-                    val recordedBlocks = draft.blocks.map { current ->
-                        current.withRecordedChanges(project.blocks.firstOrNull { it.id == current.id })
+            if (compact) {
+                Column(Modifier.fillMaxWidth()) {
+                    Text("Редагування об'єкта", style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { confirmDelete = true }, enabled = !photoBusy,
+                            modifier = Modifier.testTag("delete-object")) {
+                            Text("Видалити об’єкт", color = MaterialTheme.colorScheme.error)
+                        }
+                        IconButton(onClick = ::discardAndClose, enabled = !photoBusy,
+                            modifier = Modifier.semantics { contentDescription = "Скасувати" }) {
+                            EditActionGlyph("xmark")
+                        }
+                        IconButton(enabled = draft.displayName.isNotBlank() && !photoBusy,
+                            onClick = ::saveChanges, modifier = Modifier.testTag("save-object-editor")
+                                .semantics { contentDescription = "Зберегти" }) {
+                            EditActionGlyph("check")
+                        }
                     }
-                    onSave(draft.copy(name = name, customer = name, blocks = recordedBlocks))
-                }, modifier = Modifier.testTag("save-object-editor")
-                    .semantics { contentDescription = "Зберегти" }) {
-                    EditActionGlyph("check")
+                }
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Редагування об'єкта", style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { confirmDelete = true }, enabled = !photoBusy,
+                        modifier = Modifier.testTag("delete-object")) {
+                        Text("Видалити об’єкт", color = MaterialTheme.colorScheme.error)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = ::discardAndClose, enabled = !photoBusy,
+                        modifier = Modifier.semantics { contentDescription = "Скасувати" }) {
+                        EditActionGlyph("xmark")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(enabled = draft.displayName.isNotBlank() && !photoBusy,
+                        onClick = ::saveChanges, modifier = Modifier.testTag("save-object-editor")
+                            .semantics { contentDescription = "Зберегти" }) {
+                        EditActionGlyph("check")
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (compact) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(draft.displayName, { value ->
+                    draft = draft.copy(name = value, customer = value)
+                }, label = { Text("Назва об'єкта") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("object-name-editor"))
+                OutlinedTextField(draft.description, { value -> draft = draft.copy(description = value) },
+                    label = { Text("Опис об'єкта") }, minLines = 2, maxLines = 3,
+                    modifier = Modifier.fillMaxWidth().testTag("object-description-editor"))
+            } else Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(draft.displayName, { value ->
                     draft = draft.copy(name = value, customer = value)
                 }, label = { Text("Назва об'єкта") }, singleLine = true,
@@ -313,7 +424,63 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
             Spacer(Modifier.height(16.dp))
             Text("Вироби", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
-            TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f,
+            if (compact) Column(Modifier.fillMaxWidth().weight(1f)
+                .testTag("object-products-editor")) {
+                CompactSortBar(listOf("Фото", "Назва", "Опис", "Статус"),
+                    sortColumn, sortDirection, ::changeSort)
+                LazyColumn(Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (sortedProducts.isEmpty()) item {
+                        Text("Виробів поки немає", Modifier.padding(20.dp))
+                    }
+                    items(sortedProducts, key = { it.id }) { product ->
+                        Surface(Modifier.fillMaxWidth().testTag("object-editor-product-${product.id}"),
+                            shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Box(Modifier.fillMaxWidth()) {
+                                    Surface(Modifier.fillMaxWidth().height(140.dp).clickable {
+                                        photoMenuFor = product.id
+                                    }.testTag("object-product-photo-${product.id}"),
+                                        shape = RoundedCornerShape(10.dp), color = Color.Transparent,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                                        ProductThumbnail(product, Modifier.fillMaxSize())
+                                    }
+                                    DropdownMenu(expanded = photoMenuFor == product.id,
+                                        onDismissRequest = { photoMenuFor = null }) {
+                                        DropdownMenuItem(text = { Text("Вибрати з галереї") }, onClick = {
+                                            photoMenuFor = null
+                                            photoTarget = product.id
+                                            photoSource = PhotoBatchSource.GALLERY
+                                        })
+                                        DropdownMenuItem(text = { Text("Сфотографувати") }, onClick = {
+                                            photoMenuFor = null
+                                            photoTarget = product.id
+                                            photoSource = PhotoBatchSource.CAMERA
+                                        })
+                                    }
+                                }
+                                OutlinedTextField(product.name, { value ->
+                                    updateProduct(product.id) { it.copy(name = value) }
+                                }, label = { Text("Назва") }, singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                        .testTag("object-product-name-${product.id}"))
+                                OutlinedTextField(product.description, { value ->
+                                    updateProduct(product.id) { it.copy(description = value) }
+                                }, label = { Text("Опис") }, modifier = Modifier.fillMaxWidth()
+                                    .testTag("object-product-description-${product.id}"),
+                                    minLines = 2, maxLines = 4)
+                                Text("Статус", fontWeight = FontWeight.Bold)
+                                Box(Modifier.fillMaxWidth().testTag("object-product-status-${product.id}")) {
+                                    StatusPicker(product.status) { status ->
+                                        updateProduct(product.id) { it.copy(status = status) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f,
                 "Опис" to 2f, "Статус" to 1.8f), Modifier.fillMaxWidth().weight(1f)
                 .testTag("object-products-editor"), sortColumn, sortDirection, ::changeSort) {
                 if (sortedProducts.isEmpty()) item {

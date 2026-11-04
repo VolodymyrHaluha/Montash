@@ -4,6 +4,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -16,19 +17,26 @@ class ObjectProductsTest {
             MontashTheme { ObjectDetail(project.value, {}, { _, _ -> }, { _, updated -> project.value = updated }) }
         }
         compose.onNodeWithTag("add-product").performClick()
-        compose.onNodeWithTag("add-product").assertDoesNotExist()
+        compose.onNodeWithTag("add-product-dialog").assertIsDisplayed()
+        compose.onNodeWithTag("add-product").assertExists()
         compose.onNodeWithTag("product-additions").assertDoesNotExist()
         compose.onNodeWithTag("product-photo-camera").assertExists()
         compose.onNodeWithTag("product-photo-preview").assertExists()
+        compose.onNodeWithTag("product-status").assertExists()
+        val nameBounds = compose.onNodeWithTag("product-name").fetchSemanticsNode().boundsInRoot
+        val statusBounds = compose.onNodeWithTag("product-status").fetchSemanticsNode().boundsInRoot
+        assertTrue(statusBounds.top >= nameBounds.bottom)
         compose.onNodeWithTag("product-name").performTextReplacement("Чернетка виробу")
         compose.runOnIdle { assertEquals(0, project.value.blocks.size) }
         compose.onNodeWithTag("cancel-product").performClick()
+        compose.onNodeWithTag("add-product-dialog").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, project.value.blocks.size) }
         compose.onNodeWithTag("add-product").performClick()
         compose.onNodeWithTag("product-name").performTextReplacement("Збережений виріб")
         compose.onNodeWithTag("save-product").performClick()
-        compose.onNodeWithTag("product-additions").assertExists()
-        compose.onNodeWithTag("add-product").assertDoesNotExist()
+        compose.onNodeWithTag("add-product-dialog").assertDoesNotExist()
+        compose.onNodeWithTag("add-product").assertExists()
+        compose.onNodeWithText("Збережений виріб").assertIsDisplayed()
         compose.runOnIdle {
             assertEquals(1, project.value.blocks.size)
             assertEquals("Збережений виріб", project.value.blocks[0].name)
@@ -123,13 +131,22 @@ class ObjectProductsTest {
         }
         compose.onNodeWithTag("product-first").performClick()
         compose.onNodeWithTag("product-content-block").assertIsDisplayed()
+        compose.onNodeWithTag("product-section-media-media-batch").assertExists()
+        compose.onNodeWithTag("product-section-audio-audio-batch").assertExists()
+        compose.onNodeWithTag("product-section-documents-docs-batch").assertExists()
+        compose.onNodeWithTag("product-section-text-text-batch").assertExists()
+        val contentBounds = compose.onNodeWithTag("product-content-block").fetchSemanticsNode().boundsInRoot
+        val mediaBounds = compose.onNodeWithTag("product-section-media-media-batch")
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(mediaBounds.left > contentBounds.left)
+        assertTrue(mediaBounds.right < contentBounds.right)
 
         compose.onNodeWithContentDescription("Редагувати Медіа").performClick()
         compose.onNodeWithTag("add-додати-медіа").assertIsDisplayed()
         compose.onNodeWithTag("cancel-product").performClick()
 
         compose.onNodeWithContentDescription("Редагувати Голосові повідомлення").performClick()
-        compose.onNodeWithTag("add-додати-голосове").assertIsDisplayed()
+        compose.onNodeWithTag("add-додати-голосове").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("cancel-product").performClick()
 
     }

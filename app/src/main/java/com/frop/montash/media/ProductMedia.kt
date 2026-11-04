@@ -64,7 +64,8 @@ private object ThumbnailCache {
 }
 
 @Composable
-private fun MediaThumbnail(entry: MediaEntry, onOpen: () -> Unit) {
+private fun MediaThumbnail(entry: MediaEntry, height: androidx.compose.ui.unit.Dp = 150.dp,
+    onOpen: () -> Unit) {
     val video = entry.mimeType.startsWith("video/")
     var thumbnail by remember(entry.path) { mutableStateOf<android.graphics.Bitmap?>(null) }
     LaunchedEffect(entry.path) {
@@ -84,7 +85,7 @@ private fun MediaThumbnail(entry: MediaEntry, onOpen: () -> Unit) {
             }.getOrNull()
         }?.also { ThumbnailCache.put(key, it) }
     }
-    Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(12.dp))
+    Box(Modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(12.dp))
         .background(MaterialTheme.colorScheme.surfaceVariant).clickable(onClick = onOpen),
         contentAlignment = Alignment.Center) {
         thumbnail?.let { Image(it.asImageBitmap(), entry.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
@@ -100,6 +101,7 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     addition: String?, onAdditionHandled: () -> Unit,
     visibleGroup: Pair<String, String?>? = null, newBatchId: String? = null,
     onBusyChange: (Boolean) -> Unit = {}) {
+    val compact = isCompactLayout()
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val latestBlock by rememberUpdatedState(block)
@@ -302,7 +304,7 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     displayedGroups.forEachIndexed { index, group ->
         val section = group.section
         val title = when (section) {
-            "photos" -> "Фото виробу"
+            "photos" -> "Фото"
             "media" -> "Медіа"
             "audio" -> "Голосові повідомлення"
             "text" -> "Опис і примітки"
@@ -310,16 +312,19 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
         }
         ProductEntryCard(title, group.updatedAt.takeIf { it > 0 }, canEdit,
             { onEdit(section, group.batchId) }, showHeader = visibleGroup == null,
-            embedded = visibleGroup == null) {
+            embedded = visibleGroup == null,
+            modifier = Modifier.testTag("product-section-$section-${group.batchId.orEmpty()}")) {
             when (section) {
                 "photos" -> {
-                    block.photos.filter { it.batchId == group.batchId }.chunked(3).forEach { row ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val columns = if (compact) 2 else 3
+                    block.photos.filter { it.batchId == group.batchId }.chunked(columns).forEach { row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             row.forEach { photo ->
-                                PhotoImage(photo.path, Modifier.weight(1f).height(170.dp)
+                                PhotoImage(photo.path, Modifier.weight(1f)
+                                    .height(if (compact) 120.dp else 140.dp)
                                     .clip(RoundedCornerShape(12.dp)).clickable { onPhoto(photo) }, maxDimension = 512)
                             }
-                            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                            repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
                 }
@@ -328,19 +333,21 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
                         it.contentSection() == "media" &&
                         (it.mimeType.startsWith("image/") || it.mimeType.startsWith("video/")) }
                     val slotCount = mediaItems.size + if (editableMedia) 1 else 0
-                    (0 until slotCount).chunked(3).forEach { row ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val columns = if (compact) 2 else 3
+                    (0 until slotCount).chunked(columns).forEach { row ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             row.forEach { index ->
                                 if (index < mediaItems.size) {
                                     val media = mediaItems[index]
                                     Column(Modifier.weight(1f)) {
-                                        MediaThumbnail(media) { viewing = media }
+                                        MediaThumbnail(media, if (compact) 116.dp else 132.dp) { viewing = media }
                                         if (editableMedia) TextButton(onClick = {
                                             update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
                                         }) { Text("Видалити") }
                                     }
                                 } else Box(Modifier.weight(1f)) {
-                                    AddAttachmentTile("Додати медіа", Modifier.fillMaxWidth().height(150.dp)) {
+                                    AddAttachmentTile("Додати медіа", Modifier.fillMaxWidth()
+                                        .height(if (compact) 116.dp else 132.dp)) {
                                         mediaAddMenu = true
                                     }
                                     DropdownMenu(mediaAddMenu, { mediaAddMenu = false }) {
@@ -357,7 +364,7 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
                                     }
                                 }
                             }
-                            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                            repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
                 }
@@ -393,31 +400,37 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
                         documents.launch(arrayOf("*/*"))
                     }
                 }
-                "text" -> {
+                "text" -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (group.batchId == null && block.note.isNotBlank()) {
                         if (editableText) OutlinedTextField(block.note, { value -> update(latestBlock.copy(note = value)) },
                             modifier = Modifier.fillMaxWidth(), minLines = 2)
                         else Text(block.note)
                     }
                     block.texts.filter { it.batchId == group.batchId }.forEach { entry ->
-                        if (editableText) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        if (editableText) Row(Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
                             RichTextEditor(entry.text, { value ->
                                 update(latestBlock.copy(texts = latestBlock.texts.map { if (it.id == entry.id) it.copy(text = value) else it }))
                             }, modifier = Modifier.weight(1f).testTag("text-entry-${entry.id}"))
-                            TextButton(onClick = { update(latestBlock.copy(texts = latestBlock.texts.filterNot { it.id == entry.id })) }) { Text("✕") }
+                            TextButton(onClick = {
+                                update(latestBlock.copy(texts = latestBlock.texts.filterNot { it.id == entry.id }))
+                            }, modifier = Modifier.size(48.dp), contentPadding = PaddingValues(0.dp)) { Text("✕") }
                         } else RichTextDisplay(entry.text)
                     }
-                    if (editableText) AddAttachmentTile("Додати текст", Modifier.fillMaxWidth().height(72.dp)) {
-                        update(latestBlock.copy(texts = latestBlock.texts + TextEntry("",
-                            createdAt = System.currentTimeMillis(), batchId = group.batchId)))
+                    if (editableText) Row(Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AddAttachmentTile("Додати текст", Modifier.weight(1f).height(72.dp)) {
+                            update(latestBlock.copy(texts = latestBlock.texts + TextEntry("",
+                                createdAt = System.currentTimeMillis(), batchId = group.batchId)))
+                        }
+                        Spacer(Modifier.width(48.dp))
                     }
                 }
             }
         }
         if (visibleGroup == null && index < displayedGroups.lastIndex) {
-            Spacer(Modifier.height(16.dp))
-            HorizontalDivider()
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
         }
     }
     }

@@ -14,11 +14,13 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.File
@@ -83,11 +85,13 @@ internal class NavigationTapGate(
         return true
     }
 }
-
 private val Ink = Color(0xFFF0F6F3)
 private val Muted = Color(0xFFC0D1C9)
 private val Teal = Color(0xFF60D5B6)
 private val TealDark = Color(0xFFA4EBD6)
+
+@Composable
+internal fun isCompactLayout(): Boolean = LocalConfiguration.current.screenWidthDp < 840
 private val Mint = Color(0xCC214B3D)
 private val Surface = Color(0xCC16261F)
 private val SolidSurface = Color(0xFF16261F)
@@ -297,6 +301,51 @@ internal fun MontashApp() {
         if (newPath == null) photoSelection = null
     }
     BackHandler(enabled = screen == Screen.PRODUCTS) { screen = Screen.OBJECTS }
+    @Composable fun ScreenContent(current: Screen) {
+        when (current) {
+            Screen.OBJECTS -> ObjectsScreen(projects, ::addClient, ::open) { project ->
+                scope.launch {
+                    try {
+                        projects = withContext(Dispatchers.IO) {
+                            store.addProject(project) {
+                                if (remote.enabled) remote.markPending(project.id)
+                            }
+                        }
+                        sendProject()
+                        open(project)
+                    } catch (failure: Exception) { localError(failure) }
+                }
+            }
+            Screen.PRODUCTS -> {
+                val compact = isCompactLayout()
+                Column(Modifier.fillMaxSize().padding(
+                    horizontal = if (compact) 16.dp else 28.dp,
+                    vertical = if (compact) 16.dp else 22.dp
+                )) {
+                    var searchText by rememberSaveable { mutableStateOf("") }
+                    var appliedSearch by rememberSaveable { mutableStateOf("") }
+                    PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}",
+                        search = { ListSearch(searchText, { searchText = it },
+                            { appliedSearch = searchText.trim() }) })
+                    Spacer(Modifier.height(16.dp))
+                    ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
+                }
+            }
+            Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
+                key(project.id) {
+                    ObjectDetail(project, { screen = objectReturnScreen },
+                        { block, photo -> openPhoto(project, block, photo) }, ::update,
+                        initialProductId, detailBackSignal, navigationTapGate::tryEnter,
+                        onDeleteProject = { target ->
+                            scope.launch {
+                                try { deleteProject(target) }
+                                catch (failure: Exception) { localError(failure) }
+                            }
+                        })
+                }
+            }
+        }
+    }
     Box(Modifier.fillMaxSize().background(CanvasColor)) {
         Image(
             painter = painterResource(MontashResources.drawable.frop_logo_preview_01_1),
@@ -304,45 +353,17 @@ internal fun MontashApp() {
             contentScale = ContentScale.Crop,
             modifier = Modifier.matchParentSize()
         )
-        Row(Modifier.fillMaxSize()) {
-            NavigationRail(screen, { screen = it }, onBack = { detailBackSignal++ })
-            AnimatedContent(targetState = screen, label = "screen", modifier = Modifier.weight(1f)) { current ->
-                when (current) {
-                    Screen.OBJECTS -> ObjectsScreen(projects, ::addClient, ::open) { project ->
-                        scope.launch {
-                            try {
-                                projects = withContext(Dispatchers.IO) {
-                                    store.addProject(project) {
-                                        if (remote.enabled) remote.markPending(project.id)
-                                    }
-                                }
-                                sendProject()
-                                open(project)
-                            } catch (failure: Exception) { localError(failure) }
-                        }
-                    }
-                    Screen.PRODUCTS -> Column(Modifier.fillMaxSize().padding(28.dp, 22.dp)) {
-                        var searchText by rememberSaveable { mutableStateOf("") }
-                        var appliedSearch by rememberSaveable { mutableStateOf("") }
-                        PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}",
-                            search = { ListSearch(searchText, { searchText = it },
-                                { appliedSearch = searchText.trim() }) })
-                        Spacer(Modifier.height(16.dp))
-                        ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
-                    }
-                    Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
-                        key(project.id) {
-                            ObjectDetail(project, { screen = objectReturnScreen }, { block, photo -> openPhoto(project, block, photo) },
-                                ::update, initialProductId, detailBackSignal, navigationTapGate::tryEnter,
-                                onDeleteProject = { target ->
-                                    scope.launch {
-                                        try { deleteProject(target) }
-                                        catch (failure: Exception) { localError(failure) }
-                                    }
-                                })
-                        }
-                    }
-                }
+        if (isCompactLayout()) {
+            Column(Modifier.fillMaxSize()) {
+                AnimatedContent(targetState = screen, label = "screen",
+                    modifier = Modifier.weight(1f)) { ScreenContent(it) }
+                CompactNavigationBar(screen, { screen = it }, onBack = { detailBackSignal++ })
+            }
+        } else {
+            Row(Modifier.fillMaxSize()) {
+                NavigationRail(screen, { screen = it }, onBack = { detailBackSignal++ })
+                AnimatedContent(targetState = screen, label = "screen",
+                    modifier = Modifier.weight(1f)) { ScreenContent(it) }
             }
         }
     }
@@ -356,6 +377,25 @@ internal fun MontashApp() {
             PhotoViewer(photo, onClose = { photoSelection = null },
                 onReplace = { path -> scope.launch { runCatching { changePhoto(path) }.onFailure { localError(it as? Exception ?: Exception(it)) } } },
                 onDelete = { scope.launch { runCatching { changePhoto(null) }.onFailure { localError(it as? Exception ?: Exception(it)) } } })
+        }
+    }
+}
+
+@Composable
+private fun CompactNavigationBar(active: Screen, onSelect: (Screen) -> Unit, onBack: () -> Unit) {
+    NavigationBar(Modifier.fillMaxWidth().testTag("compact-navigation"), containerColor = Surface) {
+        if (active == Screen.OBJECT_DETAIL) {
+            NavigationBarItem(selected = false, onClick = onBack,
+                modifier = Modifier.testTag("navigation-back")
+                    .semantics { contentDescription = "Назад" },
+                icon = { Text("‹", fontSize = 28.sp) }, label = { Text("Назад") })
+        }
+        listOf(Screen.OBJECTS to "Об'єкти", Screen.PRODUCTS to "Вироби").forEach { (screen, label) ->
+            val selected = active == screen || (screen == Screen.OBJECTS && active == Screen.OBJECT_DETAIL)
+            NavigationBarItem(selected = selected, onClick = { onSelect(screen) },
+                modifier = Modifier.testTag("navigation-${screen.name.lowercase()}"),
+                icon = { NavGlyph(screen, if (selected) Teal else Muted) },
+                label = { Text(label) })
         }
     }
 }
@@ -410,11 +450,20 @@ private fun NavGlyph(screen: Screen, color: Color) {
 @Composable
 private fun PageHeader(title: String, subtitle: String,
     search: (@Composable () -> Unit)? = null, action: (@Composable () -> Unit)? = null) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) { Text(title, fontSize = 27.sp, fontWeight = FontWeight.Bold, color = Ink); Spacer(Modifier.height(3.dp)); Text(subtitle, color = Muted, fontSize = 13.sp) }
-        if (search != null) Box(Modifier.weight(1.5f)) { search() }
-        if (search != null && action != null) Spacer(Modifier.width(12.dp))
-        action?.invoke()
+    if (isCompactLayout()) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column { Text(title, fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Ink)
+                Spacer(Modifier.height(3.dp)); Text(subtitle, color = Muted, fontSize = 13.sp) }
+            search?.invoke()
+            if (action != null) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) { action() }
+        }
+    } else {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) { Text(title, fontSize = 27.sp, fontWeight = FontWeight.Bold, color = Ink); Spacer(Modifier.height(3.dp)); Text(subtitle, color = Muted, fontSize = 13.sp) }
+            if (search != null) Box(Modifier.weight(1.5f)) { search() }
+            if (search != null && action != null) Spacer(Modifier.width(12.dp))
+            action?.invoke()
+        }
     }
 }
 
@@ -444,12 +493,16 @@ private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: 
 @Composable
 private fun ObjectsScreen(projects: List<Project>, onAddClient: (String) -> Client?,
     onProject: (Project) -> Unit, onCreate: (Project) -> Unit) {
+    val compact = isCompactLayout()
     var searchText by rememberSaveable { mutableStateOf("") }
     var appliedSearch by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var objectName by rememberSaveable { mutableStateOf("") }
     var objectDescription by rememberSaveable { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(28.dp,22.dp)) {
+    Column(Modifier.fillMaxSize().padding(
+        horizontal = if (compact) 16.dp else 28.dp,
+        vertical = if (compact) 16.dp else 22.dp
+    )) {
         PageHeader("Об'єкти", "Всього: ${projects.size}",
             search = { ListSearch(searchText, { searchText = it },
                 { appliedSearch = searchText.trim() }) },
@@ -483,6 +536,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     onUpdate: suspend (Project, Project) -> Unit,
     initialProductId: String? = null, backSignal: Int = 0,
     canOpenProduct: () -> Boolean = { true }, onDeleteProject: (Project) -> Unit = {}) {
+    val compact = isCompactLayout()
     val scope = rememberCoroutineScope()
     var saving by remember { mutableStateOf(false) }
     var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
@@ -497,7 +551,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     var productSearchText by rememberSaveable(project.id) { mutableStateOf("") }
     var appliedProductSearch by rememberSaveable(project.id) { mutableStateOf("") }
     val savedProduct = project.blocks.find { it.id == productId }
-    val product = if (creating) draft else savedProduct
+    val product = savedProduct
 
     fun cancelProduct() {
         val originalPaths = savedProduct?.let { old ->
@@ -537,12 +591,13 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     fun saveProduct() {
         val snapshot = draft ?: return
         if (saving || editBusy) return
+        val isCreating = creating
         val changed = snapshot.copy(texts = snapshot.texts.filter { it.text.isNotBlank() })
             .withRecordedChanges(savedProduct)
         saving = true
         scope.launch {
             try {
-                val blocks = if (creating) project.blocks + changed
+                val blocks = if (isCreating) project.blocks + changed
                     else project.blocks.map { if (it.id == changed.id) changed else it }
                 onUpdate(project, project.copy(blocks = blocks))
                 if (draft == snapshot) {
@@ -550,6 +605,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                     activeEdit = null
                     editBusy = false
                 }
+                if (isCreating) productId = null
                 creating = false
                 error = null
             } catch (failure: Exception) {
@@ -561,31 +617,45 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     LaunchedEffect(backSignal) {
         if (backSignal != handledBackSignal) {
             handledBackSignal = backSignal
-            if (product != null) leaveProduct() else onBack()
+            if (product != null || draft != null) leaveProduct() else onBack()
         }
     }
     BackHandler(enabled = product != null) { leaveProduct() }
 
-    Column(Modifier.fillMaxSize().padding(horizontal = if (product == null) 28.dp else 20.dp, vertical = 20.dp)) {
-        if (product == null) Row(verticalAlignment = Alignment.CenterVertically) {
-            BackButton(onBack)
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
-                Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
+    Column(Modifier.fillMaxSize().padding(
+        horizontal = if (compact) 16.dp else if (product == null) 28.dp else 20.dp,
+        vertical = if (compact) 14.dp else 20.dp
+    )) {
+        if (product == null) {
+            val title: @Composable () -> Unit = {
+                Column {
+                    Text(project.displayName, fontWeight = FontWeight.Bold,
+                        fontSize = if (compact) 23.sp else 25.sp)
+                    Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
+                }
             }
-            ListSearch(productSearchText, { productSearchText = it },
-                { appliedProductSearch = productSearchText.trim() }, Modifier.weight(1.4f))
-            Spacer(Modifier.width(12.dp))
-            TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
-            Button(onClick = {
-                if (draft != null) cancelProduct()
-                val added = WorkBlock()
-                productId = added.id
-                draft = added
-                creating = true
-                error = null
-            }, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
+            val actions: @Composable () -> Unit = {
+                TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
+                Button(onClick = {
+                    if (draft != null) cancelProduct()
+                    draft = WorkBlock()
+                    creating = true
+                    error = null
+                }, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
+            }
+            if (compact) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                title()
+                ListSearch(productSearchText, { productSearchText = it },
+                    { appliedProductSearch = productSearchText.trim() })
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically) { actions() }
+            } else Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { title() }
+                ListSearch(productSearchText, { productSearchText = it },
+                    { appliedProductSearch = productSearchText.trim() }, Modifier.weight(1.4f))
+                Spacer(Modifier.width(12.dp))
+                actions()
+            }
         }
         error?.let { Text(it, color = Red) }
         if (product == null) Spacer(Modifier.height(18.dp))
@@ -600,16 +670,12 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
                     ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated },
-                        editableInfo = creating, editablePhotos = creating,
-                        editableNote = creating, canEdit = !creating,
+                        editableInfo = false, editablePhotos = false,
+                        editableNote = false, canEdit = true,
                         onEdit = { beginBlockEdit("info") },
-                        addition = if (creating) pendingAddition else null,
+                        addition = null,
                         onAdditionHandled = { pendingAddition = null },
-                        showAdditions = !creating, onAdd = { requested ->
-                            if (creating) {
-                                pendingAddition = requested
-                                return@ProductBlock
-                            }
+                        showAdditions = true, onAdd = { requested ->
                             beginBlockEdit(if (requested == "photos") "photos" else when (requested) {
                                 "media-gallery", "media-photo", "media-video" -> "media"
                                 "documents" -> "documents"
@@ -617,24 +683,47 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                                 else -> "text"
                             }, addition = if (requested == "photos") "photos-empty" else requested)
                         })
-                    if (!creating) ProductMedia(product, {}, { photo -> viewingPhoto = photo },
+                    ProductMedia(product, {}, { photo -> viewingPhoto = photo },
                         editableMedia = false, editableAudio = false,
                         editableDocs = false, editablePhotos = false,
                         editableText = false, canEdit = true,
                         onEdit = { section, batchId -> beginBlockEdit(section, batchId) },
                         addition = null, onAdditionHandled = {})
                 }
+            }
+        }
+    }
+    if (creating && draft != null) {
+        val added = checkNotNull(draft)
+        Dialog(onDismissRequest = { if (!saving && !editBusy) cancelProduct() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            SurfaceCard(Modifier.fillMaxWidth(.94f).fillMaxHeight(.9f).systemBarsPadding()
+                .testTag("add-product-dialog")) {
+                Text("Новий виріб", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                error?.let { Text(it, color = Red) }
+                Spacer(Modifier.height(14.dp))
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth()
+                    .verticalScroll(rememberScrollState())) {
+                    ProductBlock(added, { photo -> viewingPhoto = photo },
+                        { updated -> if (draft?.id == updated.id) draft = updated },
+                        editableInfo = true, editablePhotos = true, editableNote = true,
+                        canEdit = false, onEdit = {}, addition = pendingAddition,
+                        onAdditionHandled = { pendingAddition = null }, showAdditions = false,
+                        onAdd = { pendingAddition = it }, statusOnNextRow = true,
+                        onBusyChange = { editBusy = it })
+                }
                 Spacer(Modifier.height(12.dp))
-                if (creating && draft != null) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = ::cancelProduct, enabled = !saving,
-                            modifier = Modifier.testTag("cancel-product").semantics { contentDescription = "Скасувати" }) {
-                            EditActionGlyph("xmark")
-                        }
-                        Button(onClick = ::saveProduct, enabled = !saving,
-                            modifier = Modifier.testTag("save-product").semantics { contentDescription = "Зберегти" }) {
-                            EditActionGlyph("check")
-                        }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    OutlinedButton(onClick = ::cancelProduct, enabled = !saving && !editBusy,
+                        modifier = Modifier.testTag("cancel-product")
+                            .semantics { contentDescription = "Скасувати" }) {
+                        EditActionGlyph("xmark")
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Button(onClick = ::saveProduct, enabled = !saving && !editBusy,
+                        modifier = Modifier.testTag("save-product")
+                            .semantics { contentDescription = "Зберегти" }) {
+                        EditActionGlyph("check")
                     }
                 }
             }
@@ -719,15 +808,18 @@ internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
 
 @Composable
 private fun ProductAdditions(onAdd: (String) -> Unit) {
+    val compact = isCompactLayout()
     var mediaMenu by remember { mutableStateOf(false) }
     val kinds = listOf("photos" to "Фото", "media" to "Медіа", "audio" to "Аудіо",
         "text" to "Текст", "documents" to "Документи")
     SurfaceCard(Modifier.fillMaxWidth().testTag("product-additions")) {
         Text("Додати нові дані", fontWeight = FontWeight.Bold, fontSize = 17.sp)
         Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().then(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             kinds.forEach { (section, label) ->
-                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                Row(if (compact) Modifier.width(126.dp) else Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically) {
                     if (section == "photos") {
                         OutlinedButton(onClick = { onAdd("photos") }, modifier = Modifier.weight(1f).testTag("add-photo-camera"),
                             contentPadding = PaddingValues(horizontal = 4.dp)) {
@@ -819,26 +911,46 @@ private fun ProductActionIcon(section: String) {
 
 @Composable
 internal fun ProductEntryCard(title: String, date: Long?, canEdit: Boolean, onEdit: () -> Unit,
-    showHeader: Boolean = true, embedded: Boolean = false,
+    showHeader: Boolean = true, embedded: Boolean = false, modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit) {
+    val compact = isCompactLayout()
     val body: @Composable ColumnScope.() -> Unit = {
         if (showHeader) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            if (compact) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    if (canEdit) IconButton(onClick = onEdit,
+                        modifier = Modifier.semantics { contentDescription = "Редагувати $title" }) {
+                        EditActionGlyph("pen")
+                    }
+                }
                 Text(if (date == null) "Дата невідома" else java.text.DateFormat.getDateTimeInstance(
                     java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(date)),
                     color = Muted, fontSize = 12.sp)
-                if (canEdit) IconButton(onClick = onEdit,
-                    modifier = Modifier.semantics { contentDescription = "Редагувати $title" }) {
-                    EditActionGlyph("pen")
+            } else {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    Text(if (date == null) "Дата невідома" else java.text.DateFormat.getDateTimeInstance(
+                        java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(date)),
+                        color = Muted, fontSize = 12.sp)
+                    if (canEdit) IconButton(onClick = onEdit,
+                        modifier = Modifier.semantics { contentDescription = "Редагувати $title" }) {
+                        EditActionGlyph("pen")
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
         }
         content()
     }
-    if (embedded) Column(Modifier.fillMaxWidth(), content = body)
-    else SurfaceCard(Modifier.fillMaxWidth(), content = body)
+    if (embedded) {
+        Surface(modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .22f),
+            border = androidx.compose.foundation.BorderStroke(1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = .55f))) {
+            Column(Modifier.fillMaxWidth().padding(14.dp), content = body)
+        }
+    } else SurfaceCard(modifier.fillMaxWidth(), content = body)
 }
 
 @Composable
@@ -858,6 +970,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
     photosOnly: Boolean = false, nameFieldTag: String = "product-name", newBatchId: String? = null,
     statusOnNextRow: Boolean = false,
     onBusyChange: (Boolean) -> Unit = {}) {
+    val compact = isCompactLayout()
     val currentBlock by rememberUpdatedState(block)
     val update by rememberUpdatedState(onUpdate)
     var photoPickerSource by remember { mutableStateOf<PhotoBatchSource?>(null) }
@@ -882,7 +995,8 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                     val visiblePhotos = if (newBatchId == null) block.photos
                         else block.photos.filter { it.batchId == newBatchId }
                     val slotCount = visiblePhotos.size + if (editablePhotos) 1 else 0
-                    (0 until slotCount).chunked(4).forEach { slots ->
+                    val columns = if (compact) 2 else 4
+                    (0 until slotCount).chunked(columns).forEach { slots ->
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             slots.forEach { index ->
                                 if (index < visiblePhotos.size) {
@@ -903,6 +1017,50 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
             } else {
             Box(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth()) {
+                    if (compact) {
+                        Column(Modifier.fillMaxWidth().padding(top = if (canEdit) 42.dp else 0.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Фото", fontWeight = FontWeight.Bold)
+                            Row(Modifier.fillMaxWidth().height(120.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                if (editablePhotos) Box {
+                                    IconButton(onClick = { photoSourceMenu = true },
+                                        modifier = Modifier.size(44.dp).testTag("product-photo-camera")) {
+                                        CameraGlyph()
+                                    }
+                                    PhotoSourceMenu(photoSourceMenu, { photoSourceMenu = false },
+                                        { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.GALLERY },
+                                        { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.CAMERA })
+                                }
+                                val first = block.photos.firstOrNull()
+                                val photoModifier = Modifier.weight(1f).fillMaxHeight()
+                                    .testTag("product-photo-preview")
+                                Box(if (first != null) photoModifier.clickable { onPhoto(first) } else photoModifier) {
+                                    if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
+                                    else PhotoImage(first.path, Modifier.fillMaxSize(), maxDimension = 320)
+                                }
+                            }
+                            Text("Назва", fontWeight = FontWeight.Bold)
+                            if (editableInfo) OutlinedTextField(block.name,
+                                { update(currentBlock.copy(name = it)) },
+                                modifier = Modifier.fillMaxWidth().testTag(nameFieldTag)
+                                    .finishEditingOnOutsideTouch(), singleLine = true)
+                            else Text(block.name.ifBlank { "—" }, Modifier.fillMaxWidth()
+                                .testTag("product-name").semantics { disabled() })
+                            Text("Опис", fontWeight = FontWeight.Bold)
+                            if (editableInfo) OutlinedTextField(block.description,
+                                { update(currentBlock.copy(description = it)) },
+                                modifier = Modifier.fillMaxWidth().testTag("product-description")
+                                    .finishEditingOnOutsideTouch(), minLines = 2)
+                            else Text(block.description.ifBlank { "—" }, Modifier.fillMaxWidth()
+                                .testTag("product-description"))
+                            Text("Статус", fontWeight = FontWeight.Bold)
+                            if (editableInfo) StatusPicker(block.status) {
+                                update(currentBlock.copy(status = it))
+                            } else StatusBadge(block.status)
+                        }
+                    } else {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Фото", Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
                         Text("Назва", Modifier.weight(2.6f), fontWeight = FontWeight.Bold)
@@ -950,6 +1108,7 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                                 } else StatusBadge(block.status)
                             }
                         }
+                    }
                     }
                 }
                 if (canEdit) IconButton(onClick = { onEdit("info") },
@@ -1156,5 +1315,3 @@ private fun PhotoActionGlyph(delete: Boolean) {
         drawLine(Color.White,Offset(w*.57f,h*.42f),Offset(w*.56f,h*.73f),stroke.width,StrokeCap.Round)
     }
 }
-
-@Composable private fun BackButton(onClick:()->Unit){Surface(Modifier.size(42.dp).clickable(onClick=onClick),shape=RoundedCornerShape(12.dp),color=Surface,border=androidx.compose.foundation.BorderStroke(1.dp,Border)){Box(contentAlignment=Alignment.Center){Text("‹",fontSize=28.sp,color=Ink)}}}

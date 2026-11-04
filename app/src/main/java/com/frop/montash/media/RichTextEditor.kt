@@ -10,14 +10,17 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.TextView
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.editableText
 import androidx.compose.ui.semantics.insertTextAtCursor
 import androidx.compose.ui.semantics.requestFocus
@@ -37,7 +40,7 @@ private class RichTextBridge(private val onChanged: (String) -> Unit) {
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
 internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -53,7 +56,7 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
                 "window.MontashText.changed(document.getElementById('editor').innerHTML);", null)
     }
 
-    Column(modifier.semantics {
+    Surface(modifier.semantics {
         editableText = AnnotatedString(value)
         requestFocus {
             webView?.requestFocus()
@@ -71,25 +74,25 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
                 "document.getElementById('editor').innerHTML=${JSONObject.quote(inserted.text)};", null)
             true
         }
-    }, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            RichTextTool("H1") { command("formatBlock", "H1") }
-            RichTextTool("H2") { command("formatBlock", "H2") }
-            RichTextTool("P") { command("formatBlock", "P") }
-            RichTextTool("B") { command("bold") }
-            RichTextTool("I") { command("italic") }
-            RichTextTool("U") { command("underline") }
-            RichTextTool("• список") { command("insertUnorderedList") }
-            RichTextTool("1. список") { command("insertOrderedList") }
-            RichTextTool("←") { command("justifyLeft") }
-            RichTextTool("↔") { command("justifyCenter") }
-            RichTextTool("→") { command("justifyRight") }
-            RichTextTool("Очистити") { command("removeFormat") }
-        }
-        Surface(Modifier.fillMaxWidth().heightIn(min = 190.dp), shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+    }, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+        Column {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                .testTag("rich-text-toolbar")) {
+                RichTextTool("H1") { command("formatBlock", "H1") }
+                RichTextTool("H2") { command("formatBlock", "H2") }
+                RichTextTool("P") { command("formatBlock", "P") }
+                RichTextTool("B") { command("bold") }
+                RichTextTool("I") { command("italic") }
+                RichTextTool("U") { command("underline") }
+                RichTextTool("• список") { command("insertUnorderedList") }
+                RichTextTool("1. список") { command("insertOrderedList") }
+                RichTextTool("←") { command("justifyLeft") }
+                RichTextTool("↔") { command("justifyCenter") }
+                RichTextTool("→") { command("justifyRight") }
+                RichTextTool("Очистити") { command("removeFormat") }
+            }
+            HorizontalDivider()
             AndroidView(factory = {
                 WebView(context).apply {
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -114,7 +117,7 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
                     """.trimIndent(), "text/html", "UTF-8", null)
                     webView = this
                 }
-            }, modifier = Modifier.fillMaxWidth().heightIn(min = 190.dp))
+            }, modifier = Modifier.fillMaxWidth().heightIn(min = 190.dp).testTag("rich-text-input"))
         }
     }
     DisposableEffect(Unit) {
@@ -128,8 +131,9 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
 
 @Composable
 private fun RichTextTool(label: String, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 11.dp, vertical = 6.dp)) {
-        Text(label, maxLines = 1)
+    Box(Modifier.height(48.dp).clickable(onClick = onClick).padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center) {
+        Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
     }
 }
 
