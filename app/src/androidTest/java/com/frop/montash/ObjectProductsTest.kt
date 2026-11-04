@@ -22,6 +22,8 @@ class ObjectProductsTest {
         compose.onNodeWithTag("product-additions").assertDoesNotExist()
         compose.onNodeWithTag("product-photo-camera").assertExists()
         compose.onNodeWithTag("product-photo-preview").assertExists()
+        compose.onNodeWithTag("product-photo-preview").performClick()
+        compose.onNodeWithTag("choose-photo-gallery").assertIsDisplayed()
         compose.onNodeWithTag("product-status").assertExists()
         val nameBounds = compose.onNodeWithTag("product-name").fetchSemanticsNode().boundsInRoot
         val statusBounds = compose.onNodeWithTag("product-status").fetchSemanticsNode().boundsInRoot

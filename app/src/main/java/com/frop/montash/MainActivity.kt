@@ -697,13 +697,12 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         val added = checkNotNull(draft)
         Dialog(onDismissRequest = { if (!saving && !editBusy) cancelProduct() },
             properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            SurfaceCard(Modifier.fillMaxWidth(.94f).fillMaxHeight(.9f).systemBarsPadding()
+            SurfaceCard(Modifier.fillMaxWidth(.96f).fillMaxHeight(.96f).systemBarsPadding()
                 .testTag("add-product-dialog")) {
                 Text("Новий виріб", fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 error?.let { Text(it, color = Red) }
                 Spacer(Modifier.height(14.dp))
-                Column(Modifier.weight(1f, fill = false).fillMaxWidth()
-                    .verticalScroll(rememberScrollState())) {
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth()) {
                     ProductBlock(added, { photo -> viewingPhoto = photo },
                         { updated -> if (draft?.id == updated.id) draft = updated },
                         editableInfo = true, editablePhotos = true, editableNote = true,
@@ -742,19 +741,33 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         }
         Dialog(onDismissRequest = { if (!saving && !editBusy) cancelProduct() },
             properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            SurfaceCard(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+            SurfaceCard(Modifier.fillMaxSize().systemBarsPadding().padding(6.dp)) {
                 Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 Spacer(Modifier.height(14.dp))
-                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())) {
-                    if (section.first == "info" || section.first == "photos") {
+                if (section.first == "info") {
+                    Column(Modifier.weight(1f, fill = false).fillMaxWidth()) {
                         ProductBlock(edited, { photo -> viewingPhoto = photo },
                             { updated -> if (draft?.id == updated.id) draft = updated },
-                            editableInfo = section.first == "info", editablePhotos = section.first == "photos",
+                            editableInfo = true, editablePhotos = true,
                             editableNote = false, canEdit = false, onEdit = {},
                             addition = pendingAddition, onAdditionHandled = { pendingAddition = null },
                             showAdditions = false, onAdd = { pendingAddition = it },
-                            photosOnly = section.first == "photos", nameFieldTag = "product-name-editor",
+                            photosOnly = false, nameFieldTag = "product-name-editor",
                             newBatchId = section.second, statusOnNextRow = section.first == "info",
+                            onBusyChange = { editBusy = it })
+                    }
+                } else {
+                    Column(Modifier.weight(1f, fill = false).fillMaxWidth()
+                        .verticalScroll(rememberScrollState())) {
+                    if (section.first == "photos") {
+                        ProductBlock(edited, { photo -> viewingPhoto = photo },
+                            { updated -> if (draft?.id == updated.id) draft = updated },
+                            editableInfo = false, editablePhotos = true,
+                            editableNote = false, canEdit = false, onEdit = {},
+                            addition = pendingAddition, onAdditionHandled = { pendingAddition = null },
+                            showAdditions = false, onAdd = { pendingAddition = it },
+                            photosOnly = true, nameFieldTag = "product-name-editor",
+                            newBatchId = section.second, statusOnNextRow = false,
                             onBusyChange = { editBusy = it })
                     } else {
                         ProductMedia(edited, { updated -> if (draft?.id == updated.id) draft = updated },
@@ -765,6 +778,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                             onEdit = { _, _ -> }, addition = pendingAddition,
                             onAdditionHandled = { pendingAddition = null }, visibleGroup = section,
                             newBatchId = section.second, onBusyChange = { editBusy = it })
+                    }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
@@ -1056,9 +1070,81 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                             else Text(block.description.ifBlank { "—" }, Modifier.fillMaxWidth()
                                 .testTag("product-description"))
                             Text("Статус", fontWeight = FontWeight.Bold)
-                            if (editableInfo) StatusPicker(block.status) {
-                                update(currentBlock.copy(status = it))
+                            if (editableInfo) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                StatusPicker(block.status, fillWidth = false) {
+                                    update(currentBlock.copy(status = it))
+                                }
                             } else StatusBadge(block.status)
+                        }
+                    } else if (statusOnNextRow) {
+                        Row(Modifier.fillMaxWidth().height(178.dp),
+                            horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                            Column(Modifier.weight(1.35f),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("Фото", fontWeight = FontWeight.Bold)
+                                Box(Modifier.fillMaxWidth().height(152.dp)) {
+                                    val first = block.photos.firstOrNull()
+                                    val photoModifier = Modifier.fillMaxSize()
+                                        .testTag("product-photo-preview")
+                                    val interactivePhoto = when {
+                                        editablePhotos -> photoModifier.clickable { photoSourceMenu = true }
+                                        first != null -> photoModifier.clickable { onPhoto(first) }
+                                        else -> photoModifier
+                                    }
+                                    Surface(interactivePhoto,
+                                        shape = RoundedCornerShape(18.dp), color = Color.Transparent,
+                                        border = androidx.compose.foundation.BorderStroke(1.dp,
+                                            MaterialTheme.colorScheme.outline)) {
+                                        if (first == null && editablePhotos) {
+                                            Column(Modifier.fillMaxSize(),
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.Center) {
+                                                CameraGlyph()
+                                                Spacer(Modifier.height(8.dp))
+                                                Text("Додати фото", color = Muted,
+                                                    style = MaterialTheme.typography.labelMedium)
+                                            }
+                                        } else if (first == null) {
+                                            ProductPlaceholder(Modifier.fillMaxSize())
+                                        } else PhotoImage(first.path, Modifier.fillMaxSize(), maxDimension = 512)
+                                    }
+                                    if (editablePhotos) Box(Modifier.align(Alignment.TopStart)
+                                        .testTag("product-photo-camera")) {
+                                        PhotoSourceMenu(photoSourceMenu, { photoSourceMenu = false },
+                                            { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.GALLERY },
+                                            { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.CAMERA })
+                                    }
+                                }
+                            }
+                            Column(Modifier.weight(2.65f),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text("Назва", fontWeight = FontWeight.Bold)
+                                if (editableInfo) OutlinedTextField(block.name,
+                                    { update(currentBlock.copy(name = it)) },
+                                    modifier = Modifier.fillMaxWidth().testTag(nameFieldTag)
+                                        .finishEditingOnOutsideTouch(), singleLine = true)
+                                else Text(block.name.ifBlank { "—" }, Modifier.fillMaxWidth()
+                                    .testTag("product-name").semantics { disabled() })
+                                Text("Опис", fontWeight = FontWeight.Bold)
+                                if (editableInfo) OutlinedTextField(block.description,
+                                    { update(currentBlock.copy(description = it)) },
+                                    modifier = Modifier.fillMaxWidth().height(64.dp)
+                                        .testTag("product-description")
+                                        .finishEditingOnOutsideTouch(), minLines = 2, maxLines = 2)
+                                else Text(block.description.ifBlank { "—" }, Modifier.fillMaxWidth()
+                                    .height(64.dp).testTag("product-description"))
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Статус", fontWeight = FontWeight.Bold,
+                                modifier = Modifier.align(Alignment.CenterHorizontally))
+                            Box(Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                contentAlignment = Alignment.Center) {
+                                if (editableInfo) StatusPicker(block.status, fillWidth = false) {
+                                    update(currentBlock.copy(status = it))
+                                } else StatusBadge(block.status)
+                            }
                         }
                     } else {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1096,18 +1182,6 @@ private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpda
                             else StatusBadge(block.status)
                         }
                         Spacer(Modifier.width(48.dp))
-                    }
-                    if (statusOnNextRow) {
-                        Spacer(Modifier.height(18.dp))
-                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Статус", fontWeight = FontWeight.Bold)
-                            Box(Modifier.fillMaxWidth(.64f).widthIn(min = 360.dp, max = 620.dp)) {
-                                if (editableInfo) StatusPicker(block.status) {
-                                    update(currentBlock.copy(status = it))
-                                } else StatusBadge(block.status)
-                            }
-                        }
                     }
                     }
                 }

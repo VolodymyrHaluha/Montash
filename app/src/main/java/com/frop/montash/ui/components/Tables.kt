@@ -106,18 +106,22 @@ internal fun StatusBadge(status: WorkStatus) {
 }
 
 @Composable
-internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, onChange: (WorkStatus) -> Unit) {
-    Row(Modifier.fillMaxWidth().testTag("product-status"),
+internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, fillWidth: Boolean = true,
+    onChange: (WorkStatus) -> Unit) {
+    val rowModifier = if (fillWidth) Modifier.fillMaxWidth() else Modifier.wrapContentWidth()
+    Row(rowModifier.height(44.dp).testTag("product-status"),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         WorkStatus.entries.forEach { value ->
             val selected = status == value
             val activeColors = value.tagColors()
-            Surface(Modifier.weight(1f).testTag("status-${value.name.lowercase()}")
+            val itemModifier = if (fillWidth) Modifier.weight(1f) else Modifier.wrapContentWidth()
+            Surface(itemModifier.fillMaxHeight().testTag("status-${value.name.lowercase()}")
                 .clickable(enabled = enabled) { onChange(value) },
                 shape = RoundedCornerShape(10.dp),
                 color = if (selected) activeColors.background else Color(0xFF46514C),
                 border = BorderStroke(1.dp, if (selected) activeColors.border else Color(0xFF75817B))) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 11.dp),
+                Box(Modifier.then(if (fillWidth) Modifier.fillMaxWidth() else Modifier)
+                    .padding(horizontal = if (fillWidth) 8.dp else 18.dp, vertical = 11.dp),
                     contentAlignment = Alignment.Center) {
                     Text(value.label, color = Color.White, style = MaterialTheme.typography.labelMedium,
                         maxLines = 1)
