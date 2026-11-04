@@ -8,6 +8,49 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ProjectDataTest {
+    @Test fun richTextHtmlTagsArePersistedUnchanged() {
+        val html = "<h2>Заголовок</h2><p><strong>Жирний</strong> і <em>курсивний</em></p><ul><li>Пункт</li></ul>"
+        val original = Project("Об'єкт", "Об'єкт", blocks = listOf(
+            WorkBlock(texts = listOf(TextEntry(html, id = "rich-text", batchId = "text-batch")))
+        ))
+
+        val restored = projectsFromJson(projectsToJson(listOf(original))).single().blocks.single()
+
+        assertEquals(html, restored.texts.single().text)
+    }
+
+    @Test fun anyMimeTypeCanRemainInDocumentsSectionAfterPersistence() {
+        val attachment = MediaEntry("/private/reference.jpg", "reference.jpg", "image/jpeg",
+            id = "document-image", createdAt = 99L, batchId = "document-batch",
+            storageSection = "documents")
+        val original = Project("Об'єкт", "Об'єкт", blocks = listOf(WorkBlock(media = listOf(attachment))))
+
+        val restored = projectsFromJson(projectsToJson(listOf(original))).single().blocks.single()
+
+        assertEquals("documents", restored.media.single().contentSection())
+        assertEquals("documents", restored.media.single().storageSection)
+        assertEquals(listOf("documents"), restored.contentGroups().map { it.section })
+    }
+
+    @Test fun capturedPhotosStayInOneBatch() {
+        val entries = photoBatchEntries(listOf("one.jpg", "two.jpg", "three.jpg"),
+            batchId = "capture-session", createdAt = 42L)
+
+        assertEquals(3, entries.size)
+        assertEquals(setOf("capture-session"), entries.map { it.batchId }.toSet())
+        assertEquals(setOf(42L), entries.map { it.createdAt }.toSet())
+    }
+    @Test fun laterMediaAdditionCreatesItsOwnPersistedBlock() {
+        val first = MediaEntry("/first.jpg", "Перше", "image/jpeg", "first", 1_000L, "batch-14")
+        val second = MediaEntry("/second.mp4", "Друге", "video/mp4", "second", 2_000L, "batch-15")
+        val block = WorkBlock(media = listOf(first, second))
+        assertEquals(listOf("batch-15", "batch-14"), block.contentGroups().map { it.batchId })
+        val restored = projectsFromJson(projectsToJson(listOf(Project("Об'єкт", "Клієнт", blocks = listOf(block)))))
+            .single().blocks.single()
+        assertEquals(block, restored)
+        assertEquals(2, restored.contentGroups().size)
+    }
+
     @Test fun contentGroupsUseNewestItemAndMoveEditedGroupToTop() {
         val block = WorkBlock(
             photos = listOf(PhotoEntry("/photo.jpg", "photo", 100L)),

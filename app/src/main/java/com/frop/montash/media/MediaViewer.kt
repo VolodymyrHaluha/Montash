@@ -7,8 +7,11 @@ import com.frop.montash.*
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.ImageDecoder
+import android.graphics.BitmapFactory
 import android.graphics.Movie
 import android.graphics.drawable.Animatable
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.SystemClock
@@ -28,11 +31,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Suppress("DEPRECATION")
-private class GifView(context: Context, path: String) : View(context) {
-    private val movie = requireNotNull(Movie.decodeFile(path)) { "GIF недоступний." }
+private class GifView(context: Context, private val movie: Movie) : View(context) {
     init { require(movie.width() > 0 && movie.height() > 0) { "GIF пошкоджено." } }
     private val started = SystemClock.uptimeMillis()
     override fun onDraw(canvas: Canvas) {
@@ -48,6 +52,11 @@ private class GifView(context: Context, path: String) : View(context) {
     }
 }
 
+private sealed interface LoadedImage {
+    data class Still(val drawable: Drawable) : LoadedImage
+    data class Gif(val movie: Movie) : LoadedImage
+}
+
 @Composable
 internal fun MediaViewer(entry: MediaEntry, onClose: () -> Unit) {
     val context = LocalContext.current
@@ -58,6 +67,32 @@ internal fun MediaViewer(entry: MediaEntry, onClose: () -> Unit) {
     var playing by remember { mutableStateOf(false) }
     var video by remember { mutableStateOf<VideoView?>(null) }
     var image by remember { mutableStateOf<View?>(null) }
+    val imageResult by produceState<Result<LoadedImage>?>(null, entry.path) {
+        if (entry.mimeType.startsWith("image/")) value = withContext(Dispatchers.IO) {
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 28) {
+                    val drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(File(entry.path))) { decoder, info, _ ->
+                        val scale = minOf(1f, 1600f / maxOf(info.size.width, info.size.height))
+                        decoder.setTargetSize((info.size.width * scale).toInt().coerceAtLeast(1),
+                            (info.size.height * scale).toInt().coerceAtLeast(1))
+                    }
+                    LoadedImage.Still(drawable)
+                } else if (entry.mimeType == "image/gif") {
+                    val movie = requireNotNull(Movie.decodeFile(entry.path))
+                    require(movie.width() > 0 && movie.height() > 0)
+                    LoadedImage.Gif(movie)
+                } else {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(entry.path, bounds)
+                    var sample = 1
+                    while (bounds.outWidth / sample > 1600 || bounds.outHeight / sample > 1600) sample *= 2
+                    val bitmap = requireNotNull(BitmapFactory.decodeFile(entry.path,
+                        BitmapFactory.Options().apply { inSampleSize = sample }))
+                    LoadedImage.Still(BitmapDrawable(context.resources, bitmap))
+                }
+            }
+        }
+    }
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) {
@@ -112,21 +147,27 @@ internal fun MediaViewer(entry: MediaEntry, onClose: () -> Unit) {
                             }
                         }) { Text(if (playing) "Пауза" else "Відтворити") }
                     }
-                    entry.mimeType.startsWith("image/") -> AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = { ctx ->
-                        try {
-                            val result: View = if (Build.VERSION.SDK_INT >= 28) ImageView(ctx).apply {
-                                scaleType = ImageView.ScaleType.FIT_CENTER
-                                val drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(File(entry.path))) { decoder, info, _ ->
-                                    val scale = minOf(1f, 1600f / maxOf(info.size.width, info.size.height))
-                                    decoder.setTargetSize((info.size.width * scale).toInt().coerceAtLeast(1), (info.size.height * scale).toInt().coerceAtLeast(1))
+                    entry.mimeType.startsWith("image/") -> {
+                        val decoded = imageResult?.getOrNull()
+                        if (decoded == null) {
+                            if (imageResult == null) CircularProgressIndicator()
+                            else Text("Цей формат зображення не підтримується пристроєм або файл пошкоджено.",
+                                color = MaterialTheme.colorScheme.error)
+                        } else key(decoded) {
+                            AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = { ctx ->
+                                val result: View = when (decoded) {
+                                    is LoadedImage.Still -> ImageView(ctx).apply {
+                                        scaleType = ImageView.ScaleType.FIT_CENTER
+                                        setImageDrawable(decoded.drawable)
+                                        (decoded.drawable as? Animatable)?.start()
+                                    }
+                                    is LoadedImage.Gif -> GifView(ctx, decoded.movie)
                                 }
-                                setImageDrawable(drawable)
-                                (drawable as? Animatable)?.start()
-                            } else if (entry.mimeType == "image/gif") GifView(ctx, entry.path)
-                            else ImageView(ctx).apply { scaleType = ImageView.ScaleType.FIT_CENTER; setImageURI(android.net.Uri.fromFile(File(entry.path))); check(drawable != null) }
-                            image = result; result
-                        } catch (_: Exception) { error = "Цей формат зображення не підтримується пристроєм або файл пошкоджено."; View(ctx) }
-                    })
+                                image = result
+                                result
+                            })
+                        }
+                    }
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             }

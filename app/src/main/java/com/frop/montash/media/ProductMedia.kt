@@ -8,8 +8,10 @@ import android.net.Uri
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.media.MediaPlayer
+import android.media.MediaMetadataRetriever
 import android.graphics.BitmapFactory
 import android.media.ThumbnailUtils
+import android.util.LruCache
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.activity.compose.BackHandler
@@ -40,6 +42,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -50,11 +54,52 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.util.UUID
 
+private object ThumbnailCache {
+    private val cache = object : LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
+    }
+
+    @Synchronized fun get(key: String): android.graphics.Bitmap? = cache.get(key)
+    @Synchronized fun put(key: String, value: android.graphics.Bitmap) { cache.put(key, value) }
+}
+
+@Composable
+private fun MediaThumbnail(entry: MediaEntry, onOpen: () -> Unit) {
+    val video = entry.mimeType.startsWith("video/")
+    var thumbnail by remember(entry.path) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(entry.path) {
+        val file = File(entry.path)
+        val key = "${entry.path}:${file.length()}:${file.lastModified()}"
+        thumbnail = ThumbnailCache.get(key) ?: withContext(Dispatchers.IO) {
+            runCatching {
+                if (video) ThumbnailUtils.createVideoThumbnail(entry.path,
+                    android.provider.MediaStore.Images.Thumbnails.MINI_KIND)
+                else {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(entry.path, bounds)
+                    var sample = 1
+                    while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2
+                    BitmapFactory.decodeFile(entry.path, BitmapFactory.Options().apply { inSampleSize = sample })
+                }
+            }.getOrNull()
+        }?.also { ThumbnailCache.put(key, it) }
+    }
+    Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(12.dp))
+        .background(MaterialTheme.colorScheme.surfaceVariant).clickable(onClick = onOpen),
+        contentAlignment = Alignment.Center) {
+        thumbnail?.let { Image(it.asImageBitmap(), entry.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            ?: Text(if (video) "▶ Відео" else "Зображення недоступне")
+        if (video && thumbnail != null) Text("▶ Відео")
+    }
+}
+
 @Composable
 internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPhoto: (PhotoEntry) -> Unit,
     editableMedia: Boolean, editableAudio: Boolean, editableDocs: Boolean, editablePhotos: Boolean, editableText: Boolean,
-    canEdit: Boolean, onEdit: (String) -> Unit,
-    addition: String?, onAdditionHandled: () -> Unit) {
+    canEdit: Boolean, onEdit: (String, String?) -> Unit,
+    addition: String?, onAdditionHandled: () -> Unit,
+    visibleGroup: Pair<String, String?>? = null, newBatchId: String? = null,
+    onBusyChange: (Boolean) -> Unit = {}) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val latestBlock by rememberUpdatedState(block)
@@ -64,19 +109,28 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     var error by remember { mutableStateOf<String?>(null) }
     var viewing by remember { mutableStateOf<MediaEntry?>(null) }
     var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var audioPanelOpen by remember { mutableStateOf(false) }
+    var audioPanelOpenedAt by remember { mutableLongStateOf(0L) }
     var recordingPath by remember { mutableStateOf<String?>(null) }
     var seconds by remember { mutableIntStateOf(0) }
     var pendingCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
+    var mediaAddMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(busy, recorder, pendingCapturePath) {
+        onBusyChange(busy || recorder != null || pendingCapturePath != null)
+    }
+    DisposableEffect(Unit) { onDispose { onBusyChange(false) } }
     fun finishRecording() {
         val active = recorder ?: return
         val path = recordingPath
         recorder = null; recordingPath = null
+        audioPanelOpen = false
         var saved = false
         try {
             active.stop()
             val file = File(checkNotNull(path))
             check(file.length() > 0) { "Запис порожній. Спробуйте записати ще раз." }
-            val entry = MediaEntry(file.absolutePath, "Голосовий запис", "audio/mp4", createdAt = System.currentTimeMillis())
+            val entry = MediaEntry(file.absolutePath, "Голосовий запис", "audio/mp4", createdAt = System.currentTimeMillis(),
+                batchId = newBatchId ?: UUID.randomUUID().toString())
             update(latestBlock.copy(media = latestBlock.media + entry))
             saved = true
         } catch (failure: Exception) { error = "Не вдалося зберегти запис. ${failure.message.orEmpty()}" }
@@ -103,7 +157,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
         } catch (failure: Exception) { active?.release(); file.delete(); error = "Не вдалося почати запис: ${failure.message.orEmpty()}" }
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) beginRecording() else error = "Для голосового запису дозвольте доступ до мікрофона в налаштуваннях Montash."
+        if (granted && audioPanelOpen) beginRecording()
+        else if (!granted) error = "Для голосового запису дозвольте доступ до мікрофона в налаштуваннях Montash."
     }
     LaunchedEffect(recorder) {
         if (recorder != null) while (isActive) { delay(1000); seconds++ }
@@ -117,9 +172,12 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
             recorder?.release(); recordingPath?.let { File(it).delete() }
         }
     }
-    BackHandler(enabled = recorder != null) { finishRecording() }
+    BackHandler(enabled = audioPanelOpen) {
+        if (recorder != null) finishRecording() else audioPanelOpen = false
+    }
     fun importFiles(uris: List<Uri>, documents: Boolean) {
         if (uris.isNotEmpty()) {
+            val batchId = newBatchId ?: UUID.randomUUID().toString()
             busy = true
             scope.launch {
                 val copied = mutableListOf<MediaEntry>()
@@ -135,14 +193,16 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
                             } ?: "Медіафайл"
                             val mime = context.contentResolver.getType(uri)
                                 ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
-                            if (documents) require(!isSupportedMediaType(mime)) { "«$name» не є документом." }
-                            else require(mime.startsWith("image/") || mime.startsWith("video/")) { "«$name» не є зображенням або відео." }
+                            if (!documents) require(mime.startsWith("image/") || mime.startsWith("video/")) {
+                                "«$name» не є зображенням або відео."
+                            }
                             val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.takeIf { it.matches(Regex("[a-zA-Z0-9]+")) } ?: "media"
                             val file = File(folder, "${UUID.randomUUID()}.$extension")
                             try {
                                 context.contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } }
                                     ?: error("Файл «$name» недоступний.")
-                                copied.add(MediaEntry(file.absolutePath, name, mime, createdAt = System.currentTimeMillis()))
+                                copied.add(MediaEntry(file.absolutePath, name, mime, createdAt = System.currentTimeMillis(),
+                                    batchId = batchId, storageSection = if (documents) "documents" else null))
                             } catch (failure: Exception) { file.delete(); throw failure }
                         }
                     }
@@ -168,7 +228,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
         if (path != null) {
             val file = File(path)
             if (success && editableMedia && file.length() > 0) update(latestBlock.copy(media = latestBlock.media +
-                MediaEntry(path, "Фото ${System.currentTimeMillis()}", "image/jpeg", createdAt = System.currentTimeMillis())))
+                MediaEntry(path, "Фото ${System.currentTimeMillis()}", "image/jpeg", createdAt = System.currentTimeMillis(),
+                    batchId = newBatchId ?: UUID.randomUUID().toString())))
             else file.delete()
         }
     }
@@ -178,7 +239,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
         if (path != null) {
             val file = File(path)
             if (success && editableMedia && file.length() > 0) update(latestBlock.copy(media = latestBlock.media +
-                MediaEntry(path, "Відео ${System.currentTimeMillis()}", "video/mp4", createdAt = System.currentTimeMillis())))
+                MediaEntry(path, "Відео ${System.currentTimeMillis()}", "video/mp4", createdAt = System.currentTimeMillis(),
+                    batchId = newBatchId ?: UUID.randomUUID().toString())))
             else file.delete()
         }
     }
@@ -208,125 +270,201 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
                 onAdditionHandled(); capture(video = true)
             }
             addition == "documents" && editableDocs -> {
-                onAdditionHandled(); documents.launch(arrayOf("application/*", "text/*"))
+                onAdditionHandled(); documents.launch(arrayOf("*/*"))
             }
             addition == "audio" && editableAudio -> {
                 onAdditionHandled()
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) beginRecording()
-                else permission.launch(Manifest.permission.RECORD_AUDIO)
+                audioPanelOpen = true
+                audioPanelOpenedAt = System.currentTimeMillis()
             }
         }
     }
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    if (recorder != null) ProductEntryCard("Запис голосу", System.currentTimeMillis(), false, {}) {
-        Text("Запис голосу: ${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}")
-        Button(onClick = ::finishRecording) { Text("Зберегти запис") }
+    if (audioPanelOpen) ProductEntryCard("Запис голосу", audioPanelOpenedAt, false, {}) {
+        Text(if (recorder == null) "Натисніть «Старт», коли будете готові." else
+            "Триває запис: ${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (recorder == null) {
+                Button(onClick = {
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) beginRecording()
+                    else permission.launch(Manifest.permission.RECORD_AUDIO)
+                }, modifier = Modifier.testTag("start-audio-recording")) { Text("Старт") }
+                OutlinedButton(onClick = { audioPanelOpen = false }) { Text("Скасувати") }
+            } else Button(onClick = ::finishRecording) { Text("Зберегти запис") }
+        }
     }
-    block.contentGroups().forEach { group ->
+    val contentGroups = remember(block) { block.contentGroups() }
+    val displayedGroups = contentGroups.filter {
+        visibleGroup == null || (it.section == visibleGroup.first && it.batchId == visibleGroup.second)
+    }
+    val groupsContent: @Composable ColumnScope.() -> Unit = {
+    displayedGroups.forEachIndexed { index, group ->
         val section = group.section
         val title = when (section) {
             "photos" -> "Фото виробу"
             "media" -> "Медіа"
             "audio" -> "Голосові повідомлення"
-            "text" -> "Текст і примітки"
+            "text" -> "Опис і примітки"
             else -> "Документи"
         }
-        ProductEntryCard(title, group.updatedAt.takeIf { it > 0 }, canEdit, { onEdit(section) }) {
+        ProductEntryCard(title, group.updatedAt.takeIf { it > 0 }, canEdit,
+            { onEdit(section, group.batchId) }, showHeader = visibleGroup == null,
+            embedded = visibleGroup == null) {
             when (section) {
                 "photos" -> {
-                    block.photos.chunked(3).forEach { row ->
+                    block.photos.filter { it.batchId == group.batchId }.chunked(3).forEach { row ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             row.forEach { photo ->
                                 PhotoImage(photo.path, Modifier.weight(1f).height(170.dp)
-                                    .clip(RoundedCornerShape(12.dp)).clickable { onPhoto(photo) })
+                                    .clip(RoundedCornerShape(12.dp)).clickable { onPhoto(photo) }, maxDimension = 512)
                             }
                             repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
-                    if (editablePhotos) Text("Торкніться фото, щоб замінити або видалити його")
                 }
-                "media" -> block.media.filter { it.mimeType.startsWith("image/") || it.mimeType.startsWith("video/") }
-                    .chunked(3).forEach { row ->
+                "media" -> {
+                    val mediaItems = block.media.filter { it.batchId == group.batchId &&
+                        it.contentSection() == "media" &&
+                        (it.mimeType.startsWith("image/") || it.mimeType.startsWith("video/")) }
+                    val slotCount = mediaItems.size + if (editableMedia) 1 else 0
+                    (0 until slotCount).chunked(3).forEach { row ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            row.forEach { media ->
-                                Column(Modifier.weight(1f)) {
-                                    Box(Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(12.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant).clickable { viewing = media },
-                                        contentAlignment = Alignment.Center) {
-                                        if (media.mimeType.startsWith("image/")) {
-                                            val bitmap = remember(media.path) { BitmapFactory.decodeFile(media.path) }
-                                            if (bitmap != null) Image(bitmap.asImageBitmap(), media.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                            else Text("Зображення недоступне")
-                                        } else {
-                                            val thumbnail = remember(media.path) { ThumbnailUtils.createVideoThumbnail(media.path,
-                                                android.provider.MediaStore.Images.Thumbnails.MINI_KIND) }
-                                            if (thumbnail != null) Image(thumbnail.asImageBitmap(), media.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                            Text("▶ Відео")
-                                        }
+                            row.forEach { index ->
+                                if (index < mediaItems.size) {
+                                    val media = mediaItems[index]
+                                    Column(Modifier.weight(1f)) {
+                                        MediaThumbnail(media) { viewing = media }
+                                        if (editableMedia) TextButton(onClick = {
+                                            update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
+                                        }) { Text("Видалити") }
                                     }
-                                    if (editableMedia) TextButton(onClick = {
-                                        update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
-                                    }) { Text("Видалити") }
+                                } else Box(Modifier.weight(1f)) {
+                                    AddAttachmentTile("Додати медіа", Modifier.fillMaxWidth().height(150.dp)) {
+                                        mediaAddMenu = true
+                                    }
+                                    DropdownMenu(mediaAddMenu, { mediaAddMenu = false }) {
+                                        DropdownMenuItem(text = { Text("Галерея телефона") }, onClick = {
+                                            mediaAddMenu = false
+                                            gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+                                        })
+                                        DropdownMenuItem(text = { Text("Сфотографувати") }, onClick = {
+                                            mediaAddMenu = false; capture(video = false)
+                                        })
+                                        DropdownMenuItem(text = { Text("Зняти відео") }, onClick = {
+                                            mediaAddMenu = false; capture(video = true)
+                                        })
+                                    }
                                 }
                             }
                             repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
                         }
                     }
-                "audio" -> block.media.filter { it.mimeType.startsWith("audio/") }.forEach { media ->
-                    AudioControls(media, onDelete = if (editableAudio) ({
-                        update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
-                    }) else null)
                 }
-                "documents" -> block.media.filterNot { isSupportedMediaType(it.mimeType) }.forEach { media ->
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = {
-                            try {
-                                val uri = FileProvider.getUriForFile(context, "${context.packageName}.photos", File(media.path))
-                                context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(uri, media.mimeType)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                })
-                            } catch (failure: Exception) { error = "Не вдалося відкрити документ: ${failure.message.orEmpty()}" }
-                        }, modifier = Modifier.weight(1f)) { Text(media.name) }
-                        if (editableDocs) TextButton(onClick = {
+                "audio" -> Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    block.media.filter { it.batchId == group.batchId && it.contentSection() == "audio" }.forEach { media ->
+                        AudioControls(media, onDelete = if (editableAudio) ({
                             update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
-                        }) { Text("Видалити") }
+                        }) else null)
+                    }
+                    if (editableAudio) AddAttachmentTile("Додати голосове", Modifier.fillMaxWidth().height(72.dp)) {
+                        audioPanelOpen = true
+                        audioPanelOpenedAt = System.currentTimeMillis()
+                    }
+                }
+                "documents" -> {
+                    block.media.filter { it.batchId == group.batchId && it.contentSection() == "documents" }.forEach { media ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = {
+                                try {
+                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.photos", File(media.path))
+                                    context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, media.mimeType)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    })
+                                } catch (failure: Exception) { error = "Не вдалося відкрити документ: ${failure.message.orEmpty()}" }
+                            }, modifier = Modifier.weight(1f)) { Text(media.name) }
+                            if (editableDocs) TextButton(onClick = {
+                                update(latestBlock.copy(media = latestBlock.media.filterNot { it.id == media.id }))
+                            }) { Text("Видалити") }
+                        }
+                    }
+                    if (editableDocs) AddAttachmentTile("Додати документ", Modifier.fillMaxWidth().height(72.dp)) {
+                        documents.launch(arrayOf("*/*"))
                     }
                 }
                 "text" -> {
-                    if (block.note.isNotBlank()) {
+                    if (group.batchId == null && block.note.isNotBlank()) {
                         if (editableText) OutlinedTextField(block.note, { value -> update(latestBlock.copy(note = value)) },
                             modifier = Modifier.fillMaxWidth(), minLines = 2)
                         else Text(block.note)
                     }
-                    block.texts.forEach { entry ->
+                    block.texts.filter { it.batchId == group.batchId }.forEach { entry ->
                         if (editableText) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(entry.text, { value ->
+                            RichTextEditor(entry.text, { value ->
                                 update(latestBlock.copy(texts = latestBlock.texts.map { if (it.id == entry.id) it.copy(text = value) else it }))
-                            }, modifier = Modifier.weight(1f), minLines = 2)
+                            }, modifier = Modifier.weight(1f).testTag("text-entry-${entry.id}"))
                             TextButton(onClick = { update(latestBlock.copy(texts = latestBlock.texts.filterNot { it.id == entry.id })) }) { Text("✕") }
-                        } else Text(entry.text)
+                        } else RichTextDisplay(entry.text)
+                    }
+                    if (editableText) AddAttachmentTile("Додати текст", Modifier.fillMaxWidth().height(72.dp)) {
+                        update(latestBlock.copy(texts = latestBlock.texts + TextEntry("",
+                            createdAt = System.currentTimeMillis(), batchId = group.batchId)))
                     }
                 }
             }
         }
+        if (visibleGroup == null && index < displayedGroups.lastIndex) {
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+        }
     }
+    }
+    if (visibleGroup == null) {
+        if (displayedGroups.isNotEmpty()) SurfaceCard(Modifier.fillMaxWidth()
+            .testTag("product-content-block"), content = groupsContent)
+    } else Column(Modifier.fillMaxWidth(), content = groupsContent)
     viewing?.let { entry -> key(entry.id) { MediaViewer(entry) { viewing = null } } }
+}
+
+@Composable
+private fun AddAttachmentTile(label: String, modifier: Modifier, onClick: () -> Unit) {
+    Surface(modifier.testTag("add-${label.lowercase().replace(' ', '-')}")
+        .clickable(onClick = onClick), shape = RoundedCornerShape(14.dp),
+        color = Color.Transparent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("+", color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.displaySmall)
+        }
+    }
 }
 
 @Composable
 private fun AudioControls(entry: MediaEntry, onDelete: (() -> Unit)?) {
     var player by remember(entry.id) { mutableStateOf<MediaPlayer?>(null) }
     var playing by remember(entry.id) { mutableStateOf(false) }
+    var ready by remember(entry.id) { mutableStateOf(false) }
     var position by remember(entry.id) { mutableFloatStateOf(0f) }
-    var totalDuration by remember(entry.id) { mutableFloatStateOf(1f) }
+    var totalDuration by remember(entry.id) { mutableFloatStateOf(0f) }
     var volume by remember(entry.id) { mutableFloatStateOf(1f) }
     var volumeOpen by remember(entry.id) { mutableStateOf(false) }
     var error by remember(entry.id) { mutableStateOf<String?>(null) }
     DisposableEffect(entry.id, player) {
         val active = player
         onDispose { active?.release() }
+    }
+    LaunchedEffect(entry.path) {
+        val duration = withContext(Dispatchers.IO) {
+            runCatching {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(entry.path)
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toFloatOrNull()
+                } finally { retriever.release() }
+            }.getOrNull()
+        }
+        if (duration != null) totalDuration = duration.coerceAtLeast(0f)
     }
     LaunchedEffect(player, playing) {
         while (playing) { position = player?.currentPosition?.toFloat() ?: 0f; delay(250) }
@@ -340,17 +478,49 @@ private fun AudioControls(entry: MediaEntry, onDelete: (() -> Unit)?) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = {
                 try {
-                    val active = player ?: MediaPlayer().apply {
-                        setDataSource(entry.path); prepare(); setVolume(volume, volume)
-                        totalDuration = duration.toFloat().coerceAtLeast(1f)
-                        setOnCompletionListener { playing = false; position = 0f; seekTo(0) }
-                    }.also { player = it }
-                    if (playing) active.pause() else active.start()
-                    playing = !playing
-                } catch (failure: Exception) { error = "Не вдалося відтворити запис"; player?.release(); player = null; playing = false }
-            }) { Text(if (playing) "Пауза" else "▶") }
-            TextButton(onClick = { player?.pause(); player?.seekTo(0); position = 0f; playing = false }) { Text("■") }
-            Slider(position, { value -> position = value; player?.seekTo(value.toInt()) }, Modifier.weight(1f), valueRange = 0f..totalDuration)
+                    val active = player
+                    if (active == null) {
+                        ready = false
+                        val created = MediaPlayer()
+                        try { created.apply {
+                            setDataSource(entry.path)
+                            setVolume(volume, volume)
+                            setOnPreparedListener {
+                                ready = true
+                                totalDuration = it.duration.toFloat().coerceAtLeast(0f)
+                                it.start()
+                                playing = true
+                            }
+                            setOnCompletionListener { playing = false; position = 0f; seekTo(0) }
+                            setOnErrorListener { _, _, _ ->
+                                error = "Не вдалося відтворити запис"
+                                ready = false; playing = false
+                                player = null
+                                true
+                            }
+                            prepareAsync()
+                        }; player = created }
+                        catch (failure: Exception) { created.release(); throw failure }
+                    } else if (ready) {
+                        if (playing) active.pause() else active.start()
+                        playing = !playing
+                    }
+                } catch (_: Exception) {
+                    error = "Не вдалося відтворити запис"
+                    player = null; ready = false; playing = false
+                }
+            }, modifier = Modifier.semantics { contentDescription = if (playing) "Пауза" else "Старт" }) {
+                Text(if (playing) "Пауза" else "▶")
+            }
+            TextButton(onClick = {
+                if (ready) { player?.pause(); player?.seekTo(0) }
+                position = 0f; playing = false
+            }, modifier = Modifier.semantics { contentDescription = "На початок" }) { Text("■") }
+            Text("${formatAudioTime(position.toInt())} / ${formatAudioTime(totalDuration.toInt())}",
+                modifier = Modifier.testTag("audio-position"), style = MaterialTheme.typography.labelMedium)
+            Slider(position.coerceIn(0f, totalDuration.coerceAtLeast(1f)),
+                { value -> position = value; if (ready) player?.seekTo(value.toInt()) },
+                Modifier.weight(1f), enabled = ready, valueRange = 0f..totalDuration.coerceAtLeast(1f))
             Box {
                 TextButton(onClick = { volumeOpen = true }) { SoundIcon(volume > 0f) }
                 DropdownMenu(expanded = volumeOpen, onDismissRequest = { volumeOpen = false }) {
@@ -361,6 +531,11 @@ private fun AudioControls(entry: MediaEntry, onDelete: (() -> Unit)?) {
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     } }
+}
+
+private fun formatAudioTime(milliseconds: Int): String {
+    val seconds = (milliseconds.coerceAtLeast(0) / 1_000)
+    return "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
 }
 
 @Composable

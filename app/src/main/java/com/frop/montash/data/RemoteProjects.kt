@@ -3,8 +3,8 @@ package com.frop.montash.data
 import com.frop.montash.*
 
 import android.content.Context
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -15,26 +15,29 @@ import java.net.URL
 import java.io.File
 
 /** HTTP API access. All addresses and credentials are injected from the root .env at build time. */
-internal class RemoteProjects(context: Context) {
-    private class RevisionConflict(val currentRevision: Long) : IllegalStateException("Застаріла ревізія об’єкта")
-    private val globalEndpoint = BuildConfig.MONTASH_GLOBAL_API_URL.trim().trimEnd('/')
-    private val localEndpoint = BuildConfig.MONTASH_LOCAL_API_URL.trim().trimEnd('/')
-    private val token = BuildConfig.MONTASH_CLIENT_API_TOKEN.trim()
-    private val preferences = context.getSharedPreferences("remote_projects", Context.MODE_PRIVATE)
+internal class RemoteProjects(
+    context: Context,
+    globalUrl: String = BuildConfig.MONTASH_GLOBAL_API_URL,
+    localUrl: String = BuildConfig.MONTASH_LOCAL_API_URL,
+    apiToken: String = BuildConfig.MONTASH_CLIENT_API_TOKEN,
+    preferencesName: String = "remote_projects"
+) {
+    class RevisionConflict(val currentRevision: Long) : IllegalStateException("Конфлікт версій об’єкта. Локальні зміни збережено для ручного узгодження.")
+    private val globalEndpoint = globalUrl.trim().trimEnd('/')
+    private val localEndpoint = localUrl.trim().trimEnd('/')
+    private val token = apiToken.trim()
+    private val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
     private val mutex = Mutex()
+    private val pendingLock = Any()
 
     val enabled: Boolean get() = globalEndpoint.isNotEmpty() && token.isNotEmpty()
 
-    suspend fun globalHealthy(): Boolean {
-        if (healthy(globalEndpoint, "global", 8_000)) return true
-        delay(500)
-        return healthy(globalEndpoint, "global", 8_000)
-    }
+    suspend fun globalHealthy(): Boolean = healthy(globalEndpoint, "global", 2_000)
     suspend fun localHealthy(): Boolean = healthy(localEndpoint, "local", 2_000)
 
     private suspend fun healthy(endpoint: String, expectedMode: String, timeoutMs: Int): Boolean = withContext(Dispatchers.IO) {
         if (endpoint.isEmpty()) return@withContext false
-        runCatching {
+        try {
             val connection = (URL("$endpoint/api/montash/health").openConnection() as HttpURLConnection).apply {
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
@@ -46,7 +49,8 @@ internal class RemoteProjects(context: Context) {
                     body.optBoolean("ok") && body.optString("mode") == expectedMode
                 }
             } finally { connection.disconnect() }
-        }.getOrDefault(false)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { false }
     }
 
     private fun request(endpoint: String, method: String, path: String, body: String? = null): JSONObject {
@@ -73,7 +77,7 @@ internal class RemoteProjects(context: Context) {
                 val detail = errorBody?.optString("error").orEmpty()
                 throw IllegalStateException("Сервер повернув $status: $detail")
             }
-            return JSONObject(response)
+            return if (response.isBlank()) JSONObject() else JSONObject(response)
         } finally {
             connection.disconnect()
         }
@@ -124,54 +128,86 @@ internal class RemoteProjects(context: Context) {
             val response = request(endpoint, "GET", "/api/montash/projects")
             val array = response.getJSONArray("projects")
             val pending = pendingIds()
+            val deleted = deletedIds()
             val remote = (0 until array.length()).map { index ->
                 val value = array.getJSONObject(index)
                 val id = value.getString("id")
                 val revisionKey = "revision:${server.name}:$id"
-                if (id !in pending || !preferences.contains(revisionKey)) {
+                if (id !in pending) {
                     preferences.edit().putLong(revisionKey, value.getLong("revision")).apply()
                 }
                 value.remove("revision")
                 value
-            }
+            }.filterNot { it.getString("id") in deleted }
             val remoteProjects = projectsFromJson(JSONArray(remote).toString())
             val remoteIds = remoteProjects.mapTo(mutableSetOf()) { it.id }
             val localOnly = local.filter { it.id !in remoteIds }
             localOnly.forEach { markPending(it.id) }
+            val localById = local.associateBy { it.id }
             remoteProjects.map { remoteProject ->
-                local.firstOrNull { it.id == remoteProject.id && it.id in pending } ?: remoteProject
+                localById[remoteProject.id]?.takeIf { it.id in pending } ?: remoteProject
             } + localOnly
         }
     }
 
-    fun markPending(id: String) {
+    fun markPending(id: String) = synchronized(pendingLock) {
         val updated = pendingIds() + id
-        check(preferences.edit().putStringSet("pending", updated).commit()) {
+        val generationKey = "pending_generation:$id"
+        check(preferences.edit().putStringSet("pending", updated)
+            .putLong(generationKey, preferences.getLong(generationKey, 0L) + 1L).commit()) {
             "Не вдалося зберегти чергу синхронізації"
         }
     }
 
-    private fun pendingIds(): Set<String> = preferences.getStringSet("pending", emptySet())?.toSet().orEmpty()
+    fun markDeleted(id: String) = synchronized(pendingLock) {
+        check(preferences.edit()
+            .putStringSet("pending", pendingIds() - id)
+            .putStringSet("deleted", deletedIds() + id)
+            .commit()) { "Не вдалося зберегти чергу видалення" }
+    }
+
+    private fun pendingIds(): Set<String> = synchronized(pendingLock) {
+        preferences.getStringSet("pending", emptySet())?.toSet().orEmpty()
+    }
+
+    private fun deletedIds(): Set<String> = synchronized(pendingLock) {
+        preferences.getStringSet("deleted", emptySet())?.toSet().orEmpty()
+    }
+
+    fun hasPending(): Boolean = pendingIds().isNotEmpty() || deletedIds().isNotEmpty()
 
     /** Transfer files saved before server media upload was available. */
     suspend fun uploadExistingMedia(store: ProjectStore, server: ServerConnection) = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (!enabled || server !in setOf(ServerConnection.LOCAL, ServerConnection.GLOBAL)) return@withLock
+            val scanKey = "media_scan_complete:${server.name}"
+            if (preferences.getBoolean(scanKey, false)) return@withLock
             val endpoint = if (server == ServerConnection.LOCAL) localEndpoint else globalEndpoint
+            var firstFailure: Exception? = null
             for (project in store.load()) {
                 for (block in project.blocks) {
                     for (photo in block.photos) {
                         if (File(photo.path).isFile) {
-                            uploadFile(endpoint, server, project.id, block.id, "photo", photo.id, photo.path, "image/jpeg")
+                            try { uploadFile(endpoint, server, project.id, block.id, "photo", photo.id, photo.path, "image/jpeg") }
+                            catch (failure: Exception) {
+                                if (failure is CancellationException) throw failure
+                                if (firstFailure == null) firstFailure = failure
+                            }
                         }
                     }
                     for (media in block.media) {
                         if (File(media.path).isFile) {
-                            uploadFile(endpoint, server, project.id, block.id, "media", media.id, media.path, media.mimeType)
+                            try { uploadFile(endpoint, server, project.id, block.id, "media", media.id, media.path, media.mimeType) }
+                            catch (failure: Exception) {
+                                if (failure is CancellationException) throw failure
+                                if (firstFailure == null) firstFailure = failure
+                            }
                         }
                     }
                 }
             }
+            firstFailure?.let { throw it }
+            check(preferences.edit().putBoolean(scanKey, true).commit()) { "Не вдалося зберегти стан передачі медіа" }
         }
     }
 
@@ -179,36 +215,78 @@ internal class RemoteProjects(context: Context) {
         mutex.withLock {
             if (!enabled || server !in setOf(ServerConnection.LOCAL, ServerConnection.GLOBAL)) return@withLock
             val endpoint = if (server == ServerConnection.LOCAL) localEndpoint else globalEndpoint
-            for (id in pendingIds()) {
-                val project = store.load().firstOrNull { it.id == id } ?: continue
-                val revisionKey = "revision:${server.name}:$id"
-                val body = JSONArray(projectsToJson(listOf(project))).getJSONObject(0)
-                    .put("revision", preferences.getLong(revisionKey, 0L))
-                val path = "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}"
-                val result = try {
-                    request(endpoint, "PUT", path, body.toString())
-                } catch (conflict: RevisionConflict) {
-                    preferences.edit().putLong(revisionKey, conflict.currentRevision).apply()
-                    body.put("revision", conflict.currentRevision)
-                    request(endpoint, "PUT", path, body.toString())
-                }
-                preferences.edit().putLong(revisionKey, result.getLong("revision")).apply()
-                for (block in project.blocks) {
-                    for (photo in block.photos) {
-                        uploadFile(endpoint, server, id, block.id, "photo", photo.id, photo.path, "image/jpeg")
+            val projects = store.load().associateBy { it.id }
+            var firstFailure: Exception? = null
+            for (id in deletedIds()) {
+                try {
+                    val encoded = java.net.URLEncoder.encode(id, "UTF-8")
+                    val revision = preferences.getLong("revision:${server.name}:$id", 0L)
+                    request(endpoint, "DELETE", "/api/montash/projects/$encoded",
+                        JSONObject().put("revision", revision).toString())
+                    synchronized(pendingLock) {
+                        check(preferences.edit().putStringSet("deleted", deletedIds() - id)
+                            .remove("revision:${server.name}:$id").commit()) {
+                            "Не вдалося підтвердити видалення об’єкта"
+                        }
                     }
-                    for (media in block.media) {
-                        uploadFile(endpoint, server, id, block.id, "media", media.id, media.path, media.mimeType)
-                    }
-                }
-                // A newer edit may have arrived while this request was in flight.
-                val unchanged = store.load().firstOrNull { it.id == id } == project
-                if (unchanged) {
-                    check(preferences.edit().putStringSet("pending", pendingIds() - id).commit()) {
-                        "Не вдалося підтвердити синхронізацію"
-                    }
+                } catch (failure: Exception) {
+                    if (failure is CancellationException) throw failure
+                    if (firstFailure == null) firstFailure = failure
                 }
             }
+            for (id in pendingIds()) {
+                val project = projects[id] ?: continue
+                val generationKey = "pending_generation:$id"
+                val generation = preferences.getLong(generationKey, 0L)
+                val revisionKey = "revision:${server.name}:$id"
+                try {
+                    val body = JSONArray(projectsToJson(listOf(project))).getJSONObject(0)
+                    val fingerprint = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(body.toString().toByteArray(Charsets.UTF_8))
+                        .joinToString("") { "%02x".format(it) }
+                    val uploadedKey = "project_uploaded:${server.name}:$id"
+                    val uploadedMarker = "$generation:$fingerprint"
+                    if (preferences.getString(uploadedKey, null) != uploadedMarker) {
+                        val path = "/api/montash/projects/${java.net.URLEncoder.encode(id, "UTF-8")}"
+                        body.put("revision", preferences.getLong(revisionKey, 0L))
+                        val result = request(endpoint, "PUT", path, body.toString())
+                        check(preferences.edit().putLong(revisionKey, result.getLong("revision"))
+                            .putString(uploadedKey, uploadedMarker).commit()) {
+                            "Не вдалося зберегти серверну ревізію"
+                        }
+                    }
+                    var mediaFailure: Exception? = null
+                    for (block in project.blocks) {
+                        for (photo in block.photos) {
+                            try { uploadFile(endpoint, server, id, block.id, "photo", photo.id, photo.path, "image/jpeg") }
+                            catch (failure: Exception) {
+                                if (failure is CancellationException) throw failure
+                                if (mediaFailure == null) mediaFailure = failure
+                            }
+                        }
+                        for (media in block.media) {
+                            try { uploadFile(endpoint, server, id, block.id, "media", media.id, media.path, media.mimeType) }
+                            catch (failure: Exception) {
+                                if (failure is CancellationException) throw failure
+                                if (mediaFailure == null) mediaFailure = failure
+                            }
+                        }
+                    }
+                    mediaFailure?.let { throw it }
+                    val unchanged = store.load().firstOrNull { it.id == id } == project
+                    if (unchanged) synchronized(pendingLock) {
+                        if (preferences.getLong(generationKey, 0L) == generation) {
+                            check(preferences.edit().putStringSet("pending", pendingIds() - id).commit()) {
+                                "Не вдалося підтвердити синхронізацію"
+                            }
+                        }
+                    }
+                } catch (failure: Exception) {
+                    if (failure is CancellationException) throw failure
+                    if (firstFailure == null) firstFailure = failure
+                }
+            }
+            firstFailure?.let { throw it }
         }
     }
 }

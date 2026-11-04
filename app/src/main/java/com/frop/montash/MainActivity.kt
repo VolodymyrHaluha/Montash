@@ -7,6 +7,7 @@ import com.frop.montash.ui.components.*
 import com.frop.montash.R as MontashResources
 
 import android.os.Bundle
+import android.content.Intent
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Context
@@ -23,6 +24,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CancellationException
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.testTag
@@ -56,7 +67,22 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
+
+internal class NavigationTapGate(
+    private val now: () -> Long = android.os.SystemClock::elapsedRealtime,
+    private val intervalMs: Long = 1_000L
+) {
+    private var nextAllowedAt = 0L
+
+    fun tryEnter(): Boolean {
+        val time = now()
+        if (time < nextAllowedAt) return false
+        nextAllowedAt = time + intervalMs
+        return true
+    }
+}
 
 private val Ink = Color(0xFFF0F6F3)
 private val Muted = Color(0xFFC0D1C9)
@@ -99,15 +125,41 @@ fun MontashTheme(content: @Composable () -> Unit) {
 internal fun MontashApp() {
     val context = LocalContext.current
     val store = remember { ProjectStore(context) }
-    var projects by remember { mutableStateOf(store.load()) }
+    var projects by remember { mutableStateOf<List<Project>>(emptyList()) }
+    var loaded by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     val remote = remember { RemoteProjects(context) }
     val monitor = remember { ServerConnectionMonitor(context, remote) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val syncRequests = remember { Channel<Unit>(Channel.CONFLATED) }
     var serverConnection by remember { mutableStateOf(ServerConnection.CHECKING) }
-    val locationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    var refreshNeeded by remember { mutableStateOf(true) }
+    val locationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
     val directoryStore = remember { LocalDirectoryStore(context) }
-    var clients by remember { mutableStateOf(directoryStore.loadClients(projects)) }
+    var clients by remember { mutableStateOf<List<Client>>(emptyList()) }
+    LaunchedEffect(store) {
+        try {
+            val initial = withContext(Dispatchers.IO) {
+                val saved = store.load()
+                saved to directoryStore.loadClients(saved)
+            }
+            projects = initial.first
+            clients = initial.second
+            loaded = true
+        } catch (failure: Exception) {
+            loadError = failure.message ?: "Не вдалося прочитати локальні дані."
+        }
+    }
+    if (!loaded) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (loadError == null) CircularProgressIndicator()
+            else Text("Не вдалося відкрити локальні дані: $loadError", color = Red)
+        }
+        return
+    }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val navigationTapGate = remember { NavigationTapGate() }
     fun localError(error: Exception) {
         scope.launch { snackbar.showSnackbar(error.message ?: "Не вдалося зберегти дані на пристрої.", actionLabel="Закрити") }
     }
@@ -115,37 +167,62 @@ internal fun MontashApp() {
         if (remote.enabled && BuildConfig.MONTASH_LOCAL_API_URL.isNotBlank() &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
             PackageManager.PERMISSION_GRANTED) {
-            locationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            locationPermission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
         }
     }
-    LaunchedEffect(monitor) {
-        val current = monitor.check()
-        serverConnection = current
-        if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
-            try {
-                val refreshed = remote.refresh(store.load(), current)
-                store.save(refreshed)
-                projects = refreshed
-                remote.upload(store, current)
-                remote.uploadExistingMedia(store, current)
-            } catch (error: Exception) { localError(error) }
-        }
-    }
-    fun sendProject(id: String) {
-        if (remote.enabled) {
-            try {
-                remote.markPending(id)
-                scope.launch {
-                    try {
-                        val current = monitor.check()
-                        serverConnection = current
-                        if (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL) {
-                            remote.upload(store, current)
-                        }
-                    } catch (error: Exception) { localError(error) }
+    LaunchedEffect(monitor, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var firstCheck = true
+            ConnectionPolling(SystemClock::elapsedRealtime, ::delay).run {
+                val current = monitor.check()
+                val previous = serverConnection
+                if (current != previous) {
+                    serverConnection = current
                 }
-            } catch (error: Exception) { localError(error) }
+                if ((firstCheck || current != previous) &&
+                    (current == ServerConnection.LOCAL || current == ServerConnection.GLOBAL)) {
+                    refreshNeeded = true
+                    syncRequests.trySend(Unit)
+                }
+                firstCheck = false
+            }
         }
+    }
+    LaunchedEffect(remote) {
+        for (request in syncRequests) {
+            var retryDelay = 2_000L
+            var attempts = 0
+            while (true) {
+                val current = serverConnection
+                if (current != ServerConnection.LOCAL && current != ServerConnection.GLOBAL) break
+                try {
+                    if (refreshNeeded) {
+                        val refreshed = withContext(Dispatchers.IO) {
+                            val snapshot = store.load()
+                            val updated = remote.refresh(snapshot, current)
+                            store.mergeRefreshed(snapshot, updated)
+                        }
+                        projects = refreshed
+                        refreshNeeded = false
+                    }
+                    if (remote.hasPending()) remote.upload(store, current)
+                    remote.uploadExistingMedia(store, current)
+                    break
+                } catch (conflict: RemoteProjects.RevisionConflict) {
+                    localError(conflict)
+                    break
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (++attempts >= 5) { localError(error); break }
+                    delay(retryDelay)
+                    retryDelay = (retryDelay * 2).coerceAtMost(60_000L)
+                }
+            }
+        }
+    }
+    fun sendProject() {
+        syncRequests.trySend(Unit)
     }
     fun addClient(value: String): Client? {
         val name = cleanName(value)
@@ -159,37 +236,67 @@ internal fun MontashApp() {
             client
         } catch(error: Exception) { localError(error); null }
     }
-    var screen by rememberSaveable { mutableStateOf(Screen.HOME) }
+    var screen by rememberSaveable { mutableStateOf(Screen.OBJECTS) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var initialProductId by rememberSaveable { mutableStateOf<String?>(null) }
     var objectReturnScreen by rememberSaveable { mutableStateOf(Screen.OBJECTS) }
     var detailBackSignal by remember { mutableIntStateOf(0) }
     var photoSelection by rememberSaveable { mutableStateOf<List<String>?>(null) }
-    fun update(project: Project) {
-        val updated = projects.map { if (it.id == project.id) project else it }
-        store.save(updated)
+    suspend fun update(expected: Project, project: Project) {
+        val (updated, changed) = withContext(Dispatchers.IO) {
+            store.replaceProject(expected, project) {
+                if (remote.enabled) remote.markPending(project.id)
+            }
+        }
         projects = updated
-        sendProject(project.id)
+        if (changed) sendProject()
     }
-    fun open(project: Project) { selectedId = project.id; initialProductId = null; objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL }
-    fun openProduct(project: Project, product: WorkBlock) { selectedId = project.id; initialProductId = product.id; objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL }
+    suspend fun deleteProject(expected: Project) {
+        val removedFiles = expected.blocks.flatMap { block ->
+            block.photos.map { it.path } + block.media.map { it.path }
+        }
+        val updated = withContext(Dispatchers.IO) {
+            store.deleteProject(expected) {
+                if (remote.enabled) remote.markDeleted(expected.id)
+            }
+        }
+        projects = updated
+        selectedId = null
+        initialProductId = null
+        screen = Screen.OBJECTS
+        val retainedFiles = updated.flatMap { project -> project.blocks.flatMap { block ->
+            block.photos.map { it.path } + block.media.map { it.path }
+        } }.toSet()
+        withContext(Dispatchers.IO) {
+            removedFiles.filterNot { it in retainedFiles }.distinct().forEach { File(it).delete() }
+        }
+        sendProject()
+    }
+    fun open(project: Project) {
+        if (!navigationTapGate.tryEnter()) return
+        selectedId = project.id; initialProductId = null; objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL
+    }
+    fun openProduct(project: Project, product: WorkBlock) {
+        if (!navigationTapGate.tryEnter()) return
+        selectedId = project.id; initialProductId = product.id; objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL
+    }
     fun openPhoto(project: Project, block: WorkBlock, photo: PhotoEntry) {
         photoSelection = listOf(project.id, block.id, photo.id)
     }
-    fun changePhoto(newPath: String?) {
+    suspend fun changePhoto(newPath: String?) {
         val selection = checkNotNull(photoSelection)
         val project = checkNotNull(projects.find { it.id == selection[0] })
         val block = checkNotNull(project.blocks.find { it.id == selection[1] })
         val oldPhoto = checkNotNull(block.photos.find { it.id == selection[2] })
         val photos = if (newPath == null) block.photos.filterNot { it.id == oldPhoto.id }
         else block.photos.map { if (it.id == oldPhoto.id) it.copy(path = newPath) else it }
-        update(project.copy(blocks = project.blocks.map { if (it.id == block.id) it.copy(photos = photos) else it }))
+        update(project, project.copy(blocks = project.blocks.map { if (it.id == block.id) it.copy(photos = photos) else it }))
         // Remove the old file only after the changed object has been saved.
         val stillUsed = projects.any { p -> p.blocks.any { b -> b.photos.any { it.path == oldPhoto.path } } }
-        if (!stillUsed) runCatching { File(oldPhoto.path).delete() }
+        if (!stillUsed) withContext(Dispatchers.IO) { runCatching { File(oldPhoto.path).delete() } }
         if (newPath == null) photoSelection = null
     }
-    BackHandler(enabled = screen == Screen.OBJECTS || screen == Screen.PRODUCTS) { screen = Screen.HOME }
+    BackHandler(enabled = screen == Screen.PRODUCTS) { screen = Screen.OBJECTS }
     Box(Modifier.fillMaxSize().background(CanvasColor)) {
         Image(
             painter = painterResource(MontashResources.drawable.frop_logo_preview_01_1),
@@ -201,26 +308,38 @@ internal fun MontashApp() {
             NavigationRail(screen, { screen = it }, onBack = { detailBackSignal++ })
             AnimatedContent(targetState = screen, label = "screen", modifier = Modifier.weight(1f)) { current ->
                 when (current) {
-                    Screen.HOME -> HomeScreen(projects, serverConnection, ::open, { screen = Screen.OBJECTS })
-                    Screen.OBJECTS -> ObjectsScreen(projects, clients, ::addClient, ::open) { project ->
-                        val updated = projects + project
-                        store.save(updated)
-                        projects = updated
-                        sendProject(project.id)
-                        open(project)
+                    Screen.OBJECTS -> ObjectsScreen(projects, ::addClient, ::open) { project ->
+                        scope.launch {
+                            try {
+                                projects = withContext(Dispatchers.IO) {
+                                    store.addProject(project) {
+                                        if (remote.enabled) remote.markPending(project.id)
+                                    }
+                                }
+                                sendProject()
+                                open(project)
+                            } catch (failure: Exception) { localError(failure) }
+                        }
                     }
                     Screen.PRODUCTS -> Column(Modifier.fillMaxSize().padding(28.dp, 22.dp)) {
                         var searchText by rememberSaveable { mutableStateOf("") }
                         var appliedSearch by rememberSaveable { mutableStateOf("") }
-                        PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}")
-                        Spacer(Modifier.height(12.dp))
-                        ListSearch(searchText, { searchText = it }, { appliedSearch = searchText.trim() })
+                        PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}",
+                            search = { ListSearch(searchText, { searchText = it },
+                                { appliedSearch = searchText.trim() }) })
                         Spacer(Modifier.height(16.dp))
                         ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
                     }
                     Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
                         key(project.id) {
-                            ObjectDetail(project, { screen = objectReturnScreen }, { block, photo -> openPhoto(project, block, photo) }, ::update, initialProductId, detailBackSignal)
+                            ObjectDetail(project, { screen = objectReturnScreen }, { block, photo -> openPhoto(project, block, photo) },
+                                ::update, initialProductId, detailBackSignal, navigationTapGate::tryEnter,
+                                onDeleteProject = { target ->
+                                    scope.launch {
+                                        try { deleteProject(target) }
+                                        catch (failure: Exception) { localError(failure) }
+                                    }
+                                })
                         }
                     }
                 }
@@ -235,19 +354,29 @@ internal fun MontashApp() {
             ?.find { it.id == selection[1] }?.photos?.find { it.id == selection[2] }
         if (photo != null) key(selection) {
             PhotoViewer(photo, onClose = { photoSelection = null },
-                onReplace = { changePhoto(it) }, onDelete = { changePhoto(null) })
+                onReplace = { path -> scope.launch { runCatching { changePhoto(path) }.onFailure { localError(it as? Exception ?: Exception(it)) } } },
+                onDelete = { scope.launch { runCatching { changePhoto(null) }.onFailure { localError(it as? Exception ?: Exception(it)) } } })
         }
     }
 }
 
 @Composable
 private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit, onBack: () -> Unit) {
-    val items = listOf(Screen.HOME to "Головна", Screen.OBJECTS to "Об'єкти", Screen.PRODUCTS to "Вироби")
+    val items = listOf(Screen.OBJECTS to "Об'єкти", Screen.PRODUCTS to "Вироби")
     Column(
         Modifier.width(116.dp).fillMaxHeight().background(Surface).padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (active == Screen.OBJECT_DETAIL) TextButton(onClick = onBack, modifier = Modifier.testTag("navigation-back")) { Text("‹ Назад") }
+        if (active == Screen.OBJECT_DETAIL) IconButton(onClick = onBack,
+            modifier = Modifier.testTag("navigation-back").semantics { contentDescription = "Назад" }) {
+            Canvas(Modifier.size(24.dp)) {
+                val stroke = 2.5.dp.toPx()
+                drawLine(Teal, Offset(size.width * .62f, size.height * .15f),
+                    Offset(size.width * .32f, size.height * .5f), stroke, cap = StrokeCap.Round)
+                drawLine(Teal, Offset(size.width * .32f, size.height * .5f),
+                    Offset(size.width * .62f, size.height * .85f), stroke, cap = StrokeCap.Round)
+            }
+        }
         if (active == Screen.OBJECT_DETAIL) Spacer(Modifier.weight(1f))
         items.forEach { (screen, label) ->
             val selected = active == screen || (screen == Screen.OBJECTS && active in listOf(Screen.OBJECT_DETAIL))
@@ -271,7 +400,6 @@ private fun NavGlyph(screen: Screen, color: Color) {
     Canvas(Modifier.size(23.dp)) {
         val s = size.minDimension
         when (screen) {
-            Screen.HOME -> { drawRoundRect(color, Offset(s*.15f,s*.42f), Size(s*.7f,s*.48f), cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f)); val p=Path().apply{moveTo(s*.1f,s*.46f);lineTo(s*.5f,s*.1f);lineTo(s*.9f,s*.46f)};drawPath(p,color,style=Stroke(2.5f,cap=StrokeCap.Round)) }
             Screen.PRODUCTS -> { drawRect(color, Offset(s*.2f,s*.1f), Size(s*.6f,s*.8f), style=Stroke(2.5f)); repeat(3) { drawLine(color, Offset(s*.32f,s*(.32f+it*.18f)), Offset(s*.68f,s*(.32f+it*.18f)), strokeWidth=2f) } }
             Screen.OBJECTS, Screen.OBJECT_DETAIL -> { drawRoundRect(color, Offset(s*.13f,s*.1f), Size(s*.74f,s*.8f), cornerRadius=androidx.compose.ui.geometry.CornerRadius(4f),style=Stroke(2.5f)); repeat(2){r->repeat(2){c->drawRect(color,Offset(s*(.26f+c*.31f),s*(.27f+r*.29f)),Size(s*.16f,s*.14f))}} }
 
@@ -280,16 +408,20 @@ private fun NavGlyph(screen: Screen, color: Color) {
 }
 
 @Composable
-private fun PageHeader(title: String, subtitle: String, action: (@Composable () -> Unit)? = null) {
+private fun PageHeader(title: String, subtitle: String,
+    search: (@Composable () -> Unit)? = null, action: (@Composable () -> Unit)? = null) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) { Text(title, fontSize = 27.sp, fontWeight = FontWeight.Bold, color = Ink); Spacer(Modifier.height(3.dp)); Text(subtitle, color = Muted, fontSize = 13.sp) }
+        if (search != null) Box(Modifier.weight(1.5f)) { search() }
+        if (search != null && action != null) Spacer(Modifier.width(12.dp))
         action?.invoke()
     }
 }
 
 @Composable
-private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: () -> Unit) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: () -> Unit,
+    modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Row(Modifier.widthIn(max = 540.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(value, onValueChange, modifier = Modifier.weight(1f).testTag("list-search-input"),
                 placeholder = { Text("Пошук...") }, singleLine = true,
@@ -307,79 +439,25 @@ private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: 
     }
 }
 
-@Composable
-private fun HomeScreen(projects: List<Project>, connection: ServerConnection, onProject: (Project) -> Unit, onObjects: () -> Unit) {
-    var visibleProjectCount by rememberSaveable { mutableIntStateOf(5) }
-    val visibleProjects = projects.take(visibleProjectCount)
-    Column(Modifier.fillMaxSize().padding(28.dp, 22.dp, 28.dp, 18.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment=Alignment.CenterVertically) {
-            Text("Об’єктів: ${projects.size}", color=Muted, fontSize=13.sp, modifier=Modifier.weight(1f))
-            Text(connection.label, color=if (connection == ServerConnection.LOCAL || connection == ServerConnection.GLOBAL) Teal else Muted,
-                fontSize=12.sp, modifier=Modifier.testTag("server-connection"))
-            Spacer(Modifier.width(14.dp))
-            Surface(shape=RoundedCornerShape(13.dp), color=Surface, border=androidx.compose.foundation.BorderStroke(1.dp,Border)) {
-                Text("Дані на пристрої", color=Muted, fontSize=12.sp, modifier=Modifier.padding(14.dp,9.dp))
-            }
-        }
-        Spacer(Modifier.height(18.dp))
-        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            SurfaceCard(Modifier.fillMaxSize()) {
-                SectionTitle("Об'єкти", "Всі об'єкти", onObjects)
-                Spacer(Modifier.height(10.dp))
-                LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
-                    if (projects.isEmpty()) item {
-                        Text("Додайте об’єкт у вкладці «Об’єкти»", color=Muted)
-                    }
-                    items(visibleProjects, key={it.id}) { project ->
-                        ProjectRow(project) { onProject(project) }
-                        if (project.id != visibleProjects.last().id) HorizontalDivider(color=Border)
-                    }
-                    if (visibleProjectCount < projects.size) item {
-                        TextButton(
-                            onClick={ visibleProjectCount = (visibleProjectCount + 5).coerceAtMost(projects.size) },
-                            modifier=Modifier.fillMaxWidth()
-                        ) { Text("Показати більше") }
-                    }
-                }
-            }
-
-        }
-    }
-}
-
-@Composable private fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) = Surface(modifier, shape=RoundedCornerShape(20.dp), color=Surface, border=androidx.compose.foundation.BorderStroke(1.dp,Border)) { Column(Modifier.padding(18.dp), content=content) }
-
-@Composable private fun SectionTitle(title:String, action:String, click:()->Unit){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(title,fontWeight=FontWeight.Bold,fontSize=17.sp,modifier=Modifier.weight(1f));Text(action,color=Teal,fontWeight=FontWeight.SemiBold,fontSize=12.sp,modifier=Modifier.clickable(onClick=click).padding(6.dp))}}
-
-@Composable private fun ProjectRow(project: Project, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick=onClick).padding(vertical=16.dp), verticalAlignment=Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(project.displayName, fontWeight=FontWeight.Bold, fontSize=16.sp)
-            Text("Виробів: ${project.blocks.size}", color=Muted, fontSize=12.sp)
-        }
-        Text(" ›", fontSize=25.sp, color=Muted)
-    }
-}
+@Composable internal fun SurfaceCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) = Surface(modifier, shape=RoundedCornerShape(20.dp), color=Surface, border=androidx.compose.foundation.BorderStroke(1.dp,Border)) { Column(Modifier.padding(18.dp), content=content) }
 
 @Composable
-private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddClient: (String) -> Client?, onProject: (Project) -> Unit, onCreate: (Project) -> Unit) {
+private fun ObjectsScreen(projects: List<Project>, onAddClient: (String) -> Client?,
+    onProject: (Project) -> Unit, onCreate: (Project) -> Unit) {
     var searchText by rememberSaveable { mutableStateOf("") }
     var appliedSearch by rememberSaveable { mutableStateOf("") }
     var creating by rememberSaveable { mutableStateOf(false) }
     var objectName by rememberSaveable { mutableStateOf("") }
     var objectDescription by rememberSaveable { mutableStateOf("") }
-    var customer by rememberSaveable { mutableStateOf("") }
-    var chosenClientId by rememberSaveable { mutableStateOf<String?>(null) }
-    val chosenClient = clients.find { it.id == chosenClientId }
-    val matches = clients.filter { nameKey(it.name).contains(nameKey(customer)) }
     Column(Modifier.fillMaxSize().padding(28.dp,22.dp)) {
-        PageHeader("Об'єкти", "Всього: ${projects.size}") {
-            Button(onClick={ objectName="";objectDescription="";customer="";chosenClientId=null;creating=true }) { Text("Створити об'єкт") }
-        }
-        Spacer(Modifier.height(12.dp))
-        ListSearch(searchText, { searchText = it }, { appliedSearch = searchText.trim() })
+        PageHeader("Об'єкти", "Всього: ${projects.size}",
+            search = { ListSearch(searchText, { searchText = it },
+                { appliedSearch = searchText.trim() }) },
+            action = {
+                Button(onClick={ objectName="";objectDescription="";creating=true }) { Text("Створити об'єкт") }
+            })
         Spacer(Modifier.height(16.dp))
-        if (projects.isEmpty()) Text("Створіть перший об'єкт: вкажіть замовника.", color=Muted)
+        if (projects.isEmpty()) Text("Створіть перший об'єкт: вкажіть його назву.", color=Muted)
         ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
     }
     if (creating) AlertDialog(
@@ -388,37 +466,29 @@ private fun ObjectsScreen(projects: List<Project>, clients: List<Client>, onAddC
         text={ Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(objectName, { objectName=it }, label={Text("Назва об'єкта")}, singleLine=true)
             OutlinedTextField(objectDescription, { objectDescription=it }, label={Text("Опис об'єкта")}, minLines=2)
-            OutlinedTextField(customer, {customer=it;chosenClientId=null}, label={Text("Замовник")}, singleLine=true, modifier=Modifier.finishEditingOnOutsideTouch())
-            if(chosenClient!=null) Text("Обрано: ${chosenClient.name}",color=Teal)
-            else {
-                if(matches.isEmpty()) {
-                    Text("Замовників не знайдено",color=Muted)
-                    if(cleanName(customer).isNotBlank()) TextButton(onClick={
-                        onAddClient(customer)?.let { client -> chosenClientId=client.id; customer=client.name }
-                    }) {Text("Додати замовника")}
-                }
-                LazyColumn(Modifier.heightIn(max=220.dp)) {
-                    items(matches,key={it.id}) {client ->
-                        Text(client.name,modifier=Modifier.fillMaxWidth().clickable {
-                            chosenClientId=client.id;customer=client.name
-                        }.padding(vertical=12.dp))
-                    }
-                }
-            }
         } },
-        confirmButton={ TextButton(enabled=chosenClient!=null, onClick={
-            chosenClient?.let {client -> onCreate(Project(name=objectName.trim().ifBlank { client.name },customer=client.name,customerId=client.id,description=objectDescription))}
-            customer="";chosenClientId=null;creating=false
+        confirmButton={ TextButton(enabled=cleanName(objectName).isNotBlank(), onClick={
+            onAddClient(objectName)?.let { client ->
+                onCreate(Project(name=client.name, customer=client.name,
+                    customerId=client.id, description=objectDescription))
+                creating=false
+            }
         }) {Text("Створити")} },
         dismissButton={TextButton(onClick={creating=false}) {Text("Скасувати")}}
     )
 }
 
 @Composable
-internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit, onUpdate: (Project) -> Unit,
-    initialProductId: String? = null, backSignal: Int = 0) {
+internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit,
+    onUpdate: suspend (Project, Project) -> Unit,
+    initialProductId: String? = null, backSignal: Int = 0,
+    canOpenProduct: () -> Boolean = { true }, onDeleteProject: (Project) -> Unit = {}) {
+    val scope = rememberCoroutineScope()
+    var saving by remember { mutableStateOf(false) }
     var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
     var draft by remember(project.id) { mutableStateOf<WorkBlock?>(null) }
+    var activeEdit by remember(project.id) { mutableStateOf<Pair<String, String?>?>(null) }
+    var editBusy by remember(project.id) { mutableStateOf(false) }
     var creating by remember(project.id) { mutableStateOf(false) }
     var viewingPhoto by remember { mutableStateOf<PhotoEntry?>(null) }
     var editingObject by remember { mutableStateOf(false) }
@@ -427,17 +497,24 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     var productSearchText by rememberSaveable(project.id) { mutableStateOf("") }
     var appliedProductSearch by rememberSaveable(project.id) { mutableStateOf("") }
     val savedProduct = project.blocks.find { it.id == productId }
-    val product = draft ?: savedProduct
+    val product = if (creating) draft else savedProduct
 
     fun cancelProduct() {
         val originalPaths = savedProduct?.let { old ->
             (old.photos.map { it.path } + old.media.map { it.path }).toSet()
         }.orEmpty()
         draft?.let { current ->
-            (current.photos.map { it.path } + current.media.map { it.path })
-                .filterNot { it in originalPaths }.forEach { File(it).delete() }
+            val discarded = (current.photos.map { it.path } + current.media.map { it.path })
+                .filterNot { it in originalPaths }
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                    discarded.forEach { File(it).delete() }
+                }
+            }
         }
         draft = null
+        activeEdit = null
+        editBusy = false
         pendingAddition = null
         viewingPhoto = null
         if (creating) productId = null
@@ -446,6 +523,39 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
     }
     fun leaveProduct() {
         if (draft != null) cancelProduct() else productId = null
+    }
+    fun beginBlockEdit(section: String, batchId: String? = null, addition: String? = null) {
+        val original = savedProduct ?: return
+        val targetBatch = if (addition != null) UUID.randomUUID().toString() else batchId
+        draft = if (addition == "text") original.copy(texts = original.texts + TextEntry("",
+            createdAt = System.currentTimeMillis(), batchId = targetBatch)) else original.copy()
+        activeEdit = section to targetBatch
+        editBusy = false
+        pendingAddition = addition
+        error = null
+    }
+    fun saveProduct() {
+        val snapshot = draft ?: return
+        if (saving || editBusy) return
+        val changed = snapshot.copy(texts = snapshot.texts.filter { it.text.isNotBlank() })
+            .withRecordedChanges(savedProduct)
+        saving = true
+        scope.launch {
+            try {
+                val blocks = if (creating) project.blocks + changed
+                    else project.blocks.map { if (it.id == changed.id) changed else it }
+                onUpdate(project, project.copy(blocks = blocks))
+                if (draft == snapshot) {
+                    draft = null
+                    activeEdit = null
+                    editBusy = false
+                }
+                creating = false
+                error = null
+            } catch (failure: Exception) {
+                error = failure.message ?: "Не вдалося зберегти виріб."
+            } finally { saving = false }
+        }
     }
     var handledBackSignal by remember(project.id) { mutableIntStateOf(backSignal) }
     LaunchedEffect(backSignal) {
@@ -464,6 +574,9 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                 Text(project.displayName, fontWeight = FontWeight.Bold, fontSize = 25.sp)
                 Text("Виробів: ${project.blocks.size}", color = Muted, fontSize = 12.sp)
             }
+            ListSearch(productSearchText, { productSearchText = it },
+                { appliedProductSearch = productSearchText.trim() }, Modifier.weight(1.4f))
+            Spacer(Modifier.width(12.dp))
             TextButton(onClick = { editingObject = true }) { Text("Редагувати об’єкт") }
             Button(onClick = {
                 if (draft != null) cancelProduct()
@@ -478,62 +591,103 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         if (product == null) Spacer(Modifier.height(18.dp))
         if (product == null) {
             if (project.blocks.isEmpty()) Text("Додайте перший виріб до об'єкта.", color = Muted)
-            ListSearch(productSearchText, { productSearchText = it }, { appliedProductSearch = productSearchText.trim() })
-            Spacer(Modifier.height(16.dp))
-            ProductsTable(listOf(project), { _, block -> productId = block.id }, Modifier.weight(1f).fillMaxWidth(), appliedProductSearch)
+            ProductsTable(listOf(project), { _, block -> if (canOpenProduct()) productId = block.id },
+                Modifier.weight(1f).fillMaxWidth(), appliedProductSearch)
         } else key(product.id) {
-            SurfaceCard(Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
                     Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).testTag("product-details"),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
                     ProductBlock(product, { photo -> viewingPhoto = photo }, { updated -> if (draft?.id == updated.id) draft = updated },
-                        editableInfo = draft != null, editablePhotos = draft != null,
-                        editableNote = draft != null, canEdit = draft == null,
-                        onEdit = { _ -> draft = savedProduct?.copy(); error = null },
-                        addition = pendingAddition, onAdditionHandled = { pendingAddition = null },
-                        activeAddition = null, canAdd = true,
-                        onAddProduct = {
-                            if (draft != null) cancelProduct()
-                            val added = WorkBlock()
-                            productId = added.id
-                            draft = added
-                            creating = true
-                            error = null
-                        }, onAdd = { requested ->
-                            if (draft == null) draft = savedProduct?.copy()
-                            if (requested == "text") draft = draft?.copy(texts = draft!!.texts + TextEntry("", createdAt = System.currentTimeMillis()))
-                            pendingAddition = requested
-                            error = null
+                        editableInfo = creating, editablePhotos = creating,
+                        editableNote = creating, canEdit = !creating,
+                        onEdit = { beginBlockEdit("info") },
+                        addition = if (creating) pendingAddition else null,
+                        onAdditionHandled = { pendingAddition = null },
+                        showAdditions = !creating, onAdd = { requested ->
+                            if (creating) {
+                                pendingAddition = requested
+                                return@ProductBlock
+                            }
+                            beginBlockEdit(if (requested == "photos") "photos" else when (requested) {
+                                "media-gallery", "media-photo", "media-video" -> "media"
+                                "documents" -> "documents"
+                                "audio" -> "audio"
+                                else -> "text"
+                            }, addition = if (requested == "photos") "photos-empty" else requested)
                         })
-                    ProductMedia(product, { updated -> if (draft?.id == updated.id) draft = updated }, { photo -> viewingPhoto = photo },
-                        editableMedia = draft != null, editableAudio = draft != null,
-                        editableDocs = draft != null, editablePhotos = draft != null,
-                        editableText = draft != null, canEdit = draft == null,
-                        onEdit = { _ -> draft = savedProduct?.copy(); error = null },
-                        addition = pendingAddition, onAdditionHandled = { pendingAddition = null })
+                    if (!creating) ProductMedia(product, {}, { photo -> viewingPhoto = photo },
+                        editableMedia = false, editableAudio = false,
+                        editableDocs = false, editablePhotos = false,
+                        editableText = false, canEdit = true,
+                        onEdit = { section, batchId -> beginBlockEdit(section, batchId) },
+                        addition = null, onAdditionHandled = {})
                 }
                 Spacer(Modifier.height(12.dp))
-                if (draft != null) {
+                if (creating && draft != null) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = ::cancelProduct, modifier = Modifier.testTag("cancel-product")) {
-                            Text("Скасувати")
+                        OutlinedButton(onClick = ::cancelProduct, enabled = !saving,
+                            modifier = Modifier.testTag("cancel-product").semantics { contentDescription = "Скасувати" }) {
+                            EditActionGlyph("xmark")
                         }
-                        Button(onClick = {
-                            val changed = (draft ?: return@Button).let { current ->
-                                current.copy(texts = current.texts.filter { it.text.isNotBlank() }).withRecordedChanges(savedProduct)
-                            }
-                            try {
-                                val blocks = if (creating) project.blocks + changed
-                                    else project.blocks.map { if (it.id == changed.id) changed else it }
-                                onUpdate(project.copy(blocks = blocks))
-                                draft = null
-                                creating = false
-                                error = null
-                            } catch (failure: Exception) {
-                                error = failure.message ?: "Не вдалося зберегти виріб."
-                            }
-                        }, modifier = Modifier.testTag("save-product")) { Text("Зберегти") }
+                        Button(onClick = ::saveProduct, enabled = !saving,
+                            modifier = Modifier.testTag("save-product").semantics { contentDescription = "Зберегти" }) {
+                            EditActionGlyph("check")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!creating && activeEdit != null && draft != null) {
+        val section = checkNotNull(activeEdit)
+        val edited = checkNotNull(draft)
+        val title = when (section.first) {
+            "info" -> "Основна інформація"
+            "photos" -> "Фото виробу"
+            "media" -> "Медіа"
+            "audio" -> "Голосові повідомлення"
+            "text" -> "Опис і примітки"
+            else -> "Документи"
+        }
+        Dialog(onDismissRequest = { if (!saving && !editBusy) cancelProduct() },
+            properties = DialogProperties(usePlatformDefaultWidth = false)) {
+            SurfaceCard(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Spacer(Modifier.height(14.dp))
+                Column(Modifier.weight(1f, fill = false).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    if (section.first == "info" || section.first == "photos") {
+                        ProductBlock(edited, { photo -> viewingPhoto = photo },
+                            { updated -> if (draft?.id == updated.id) draft = updated },
+                            editableInfo = section.first == "info", editablePhotos = section.first == "photos",
+                            editableNote = false, canEdit = false, onEdit = {},
+                            addition = pendingAddition, onAdditionHandled = { pendingAddition = null },
+                            showAdditions = false, onAdd = { pendingAddition = it },
+                            photosOnly = section.first == "photos", nameFieldTag = "product-name-editor",
+                            newBatchId = section.second, statusOnNextRow = section.first == "info",
+                            onBusyChange = { editBusy = it })
+                    } else {
+                        ProductMedia(edited, { updated -> if (draft?.id == updated.id) draft = updated },
+                            { photo -> viewingPhoto = photo },
+                            editableMedia = section.first == "media", editableAudio = section.first == "audio",
+                            editableDocs = section.first == "documents", editablePhotos = section.first == "photos",
+                            editableText = section.first == "text", canEdit = false,
+                            onEdit = { _, _ -> }, addition = pendingAddition,
+                            onAdditionHandled = { pendingAddition = null }, visibleGroup = section,
+                            newBatchId = section.second, onBusyChange = { editBusy = it })
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    OutlinedButton(onClick = ::cancelProduct, enabled = !saving && !editBusy,
+                        modifier = Modifier.testTag("cancel-product").semantics { contentDescription = "Скасувати" }) {
+                        EditActionGlyph("xmark")
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Button(onClick = ::saveProduct, enabled = !saving && !editBusy,
+                        modifier = Modifier.testTag("save-product").semantics { contentDescription = "Зберегти" }) {
+                        EditActionGlyph("check")
                     }
                 }
             }
@@ -550,8 +704,10 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
                 viewingPhoto = null
             })
     }
-    if (editingObject) ObjectEditDialog(project, { editingObject = false }) { updated ->
-        try { onUpdate(updated); editingObject = false } catch (failure: Exception) { error = failure.message }
+    if (editingObject) ObjectEditDialog(project, { editingObject = false }, { onDeleteProject(project) }) { updated ->
+        scope.launch {
+            try { onUpdate(project, updated); editingObject = false } catch (failure: Exception) { error = failure.message }
+        }
     }
 }
 
@@ -562,34 +718,36 @@ internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProductAdditions(enabled: Boolean, activeSection: String?, onAdd: (String) -> Unit) {
-    var photoMenu by remember { mutableStateOf(false) }
+private fun ProductAdditions(onAdd: (String) -> Unit) {
     var mediaMenu by remember { mutableStateOf(false) }
     val kinds = listOf("photos" to "Фото", "media" to "Медіа", "audio" to "Аудіо",
         "text" to "Текст", "documents" to "Документи")
-    SurfaceCard(Modifier.fillMaxWidth()) {
+    SurfaceCard(Modifier.fillMaxWidth().testTag("product-additions")) {
         Text("Додати нові дані", fontWeight = FontWeight.Bold, fontSize = 17.sp)
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             kinds.forEach { (section, label) ->
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    if (section == "photos") {
+                        OutlinedButton(onClick = { onAdd("photos") }, modifier = Modifier.weight(1f).testTag("add-photo-camera"),
+                            contentPadding = PaddingValues(horizontal = 4.dp)) {
+                            Text(label, maxLines = 1, fontSize = 13.sp)
+                            Spacer(Modifier.width(5.dp))
+                            CameraGlyph()
+                        }
+                    } else {
                     Box(Modifier.weight(1f)) {
                         OutlinedButton(onClick = {
                             when (section) {
-                                "photos" -> photoMenu = true
                                 "media" -> mediaMenu = true
                                 else -> onAdd(section)
                             }
                         },
-                            enabled = enabled || activeSection == section, modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(horizontal = 4.dp)) {
                             Text(label, maxLines = 1, fontSize = 13.sp)
                             Spacer(Modifier.width(5.dp))
                             ProductActionIcon(section)
-                        }
-                        if (section == "photos") DropdownMenu(photoMenu, { photoMenu = false }) {
-                            DropdownMenuItem(text = { Text("З галереї") }, onClick = { photoMenu = false; onAdd("photos") })
-                            DropdownMenuItem(text = { Text("Камера") }, onClick = { photoMenu = false; onAdd("camera") })
                         }
                         if (section == "media") DropdownMenu(mediaMenu, { mediaMenu = false }) {
                             DropdownMenuItem(text = { Text("Галерея телефона") }, onClick = { mediaMenu = false; onAdd("media-gallery") })
@@ -597,9 +755,23 @@ private fun ProductAdditions(enabled: Boolean, activeSection: String?, onAdd: (S
                             DropdownMenuItem(text = { Text("Зняти відео") }, onClick = { mediaMenu = false; onAdd("media-video") })
                         }
                     }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun CameraGlyph() {
+    val color = MaterialTheme.colorScheme.primary
+    Canvas(Modifier.size(18.dp)) {
+        val stroke = 1.7.dp.toPx()
+        drawRoundRect(color, Offset(size.width * .08f, size.height * .28f),
+            Size(size.width * .84f, size.height * .58f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()), style = Stroke(stroke))
+        drawRect(color, Offset(size.width * .29f, size.height * .17f), Size(size.width * .32f, size.height * .12f))
+        drawCircle(color, size.width * .18f, Offset(size.width * .5f, size.height * .56f), style = Stroke(stroke))
     }
 }
 
@@ -647,131 +819,192 @@ private fun ProductActionIcon(section: String) {
 
 @Composable
 internal fun ProductEntryCard(title: String, date: Long?, canEdit: Boolean, onEdit: () -> Unit,
+    showHeader: Boolean = true, embedded: Boolean = false,
     content: @Composable ColumnScope.() -> Unit) {
-    SurfaceCard(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 17.sp)
-            Text(if (date == null) "Дата невідома" else java.text.DateFormat.getDateTimeInstance(
-                java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(date)),
-                color = Muted, fontSize = 12.sp)
-            if (canEdit) TextButton(onClick = onEdit) { Text("✎", fontSize = 22.sp) }
+    val body: @Composable ColumnScope.() -> Unit = {
+        if (showHeader) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(if (date == null) "Дата невідома" else java.text.DateFormat.getDateTimeInstance(
+                    java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(date)),
+                    color = Muted, fontSize = 12.sp)
+                if (canEdit) IconButton(onClick = onEdit,
+                    modifier = Modifier.semantics { contentDescription = "Редагувати $title" }) {
+                    EditActionGlyph("pen")
+                }
+            }
+            Spacer(Modifier.height(12.dp))
         }
-        Spacer(Modifier.height(12.dp))
         content()
     }
+    if (embedded) Column(Modifier.fillMaxWidth(), content = body)
+    else SurfaceCard(Modifier.fillMaxWidth(), content = body)
+}
+
+@Composable
+internal fun EditActionGlyph(kind: String) {
+    val resource = when (kind) {
+        "pen" -> MontashResources.drawable.fa_pen
+        "check" -> MontashResources.drawable.fa_check
+        else -> MontashResources.drawable.fa_xmark
+    }
+    Icon(painterResource(resource), contentDescription = null, modifier = Modifier.size(20.dp))
 }
 
 @Composable
 private fun ProductBlock(block: WorkBlock, onPhoto: (PhotoEntry) -> Unit, onUpdate: (WorkBlock) -> Unit,
     editableInfo: Boolean, editablePhotos: Boolean, editableNote: Boolean, canEdit: Boolean, onEdit: (String) -> Unit,
-    addition: String?, onAdditionHandled: () -> Unit, canAdd: Boolean, activeAddition: String?,
-    onAddProduct: () -> Unit, onAdd: (String) -> Unit) {
-    val context=LocalContext.current
+    addition: String?, onAdditionHandled: () -> Unit, showAdditions: Boolean, onAdd: (String) -> Unit,
+    photosOnly: Boolean = false, nameFieldTag: String = "product-name", newBatchId: String? = null,
+    statusOnNextRow: Boolean = false,
+    onBusyChange: (Boolean) -> Unit = {}) {
     val currentBlock by rememberUpdatedState(block)
     val update by rememberUpdatedState(onUpdate)
-    var pendingPath by rememberSaveable {mutableStateOf<String?>(null)}
+    var photoPickerSource by remember { mutableStateOf<PhotoBatchSource?>(null) }
+    var photoSourceMenu by remember { mutableStateOf(false) }
     var error by remember {mutableStateOf<String?>(null)}
-    var importing by remember {mutableStateOf(false)}
-    val scope=rememberCoroutineScope()
-    val camera=rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        pendingPath?.let {path ->
-            if(success && editablePhotos) update(currentBlock.copy(photos=currentBlock.photos+PhotoEntry(path, createdAt = System.currentTimeMillis()))) else File(path).delete()
-        }
-        pendingPath=null
+    LaunchedEffect(addition, editablePhotos) {
+        if ((addition == "photos" || addition == "camera") && editablePhotos) {
+            onAdditionHandled()
+            photoSourceMenu = true
+        } else if (addition == "text" && editableNote) onAdditionHandled()
     }
-    val gallery=rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
-        if(uris.isNotEmpty()) {
-            importing=true
-            error=null
-            scope.launch {
-                try {
-                    val imported=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        uris.mapNotNull { uri ->
-                            var target: File? = null
-                            try {
-                                val file=File(context.filesDir,"photos/${UUID.randomUUID()}.jpg")
-                                    .also {it.parentFile?.mkdirs()}
-                                target=file
-                                context.contentResolver.openInputStream(uri)?.use {input ->
-                                    file.outputStream().use {output -> input.copyTo(output)}
-                                } ?: error("Фото недоступне")
-                                PhotoEntry(file.absolutePath, createdAt = System.currentTimeMillis())
-                            } catch(_: Exception) {
-                                target?.delete()
-                                null
+    photoPickerSource?.let { source -> PhotoBatchPicker(source = source,
+        onClose = { photoPickerSource = null }, onFinished = { paths ->
+        val batchId = newBatchId ?: UUID.randomUUID().toString()
+        update(currentBlock.copy(photos = currentBlock.photos + photoBatchEntries(paths, batchId)))
+        error = null
+        photoPickerSource = null
+    }, onBusyChange = onBusyChange) }
+    SurfaceCard(Modifier.fillMaxWidth()) {
+            if (photosOnly) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val visiblePhotos = if (newBatchId == null) block.photos
+                        else block.photos.filter { it.batchId == newBatchId }
+                    val slotCount = visiblePhotos.size + if (editablePhotos) 1 else 0
+                    (0 until slotCount).chunked(4).forEach { slots ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            slots.forEach { index ->
+                                if (index < visiblePhotos.size) {
+                                    val photo = visiblePhotos[index]
+                                    PhotoImage(photo.path, Modifier.size(120.dp).clickable { onPhoto(photo) },
+                                        maxDimension = 320)
+                                } else Box {
+                                    PhotoAddTile(Modifier.size(120.dp)) { photoSourceMenu = true }
+                                    PhotoSourceMenu(photoSourceMenu, { photoSourceMenu = false },
+                                        { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.GALLERY },
+                                        { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.CAMERA })
+                                }
                             }
                         }
                     }
-                    if(imported.isNotEmpty() && editablePhotos) update(currentBlock.copy(photos=currentBlock.photos+imported))
-                    if(imported.size<uris.size) error="Не вдалося додати ${uris.size-imported.size} фото. Спробуйте ще раз."
-                } finally {
-                    importing=false
+                    if (slotCount == 0) ProductPlaceholder(Modifier.size(90.dp))
                 }
-            }
-        }
-    }
-    LaunchedEffect(addition, editablePhotos) {
-        if (addition == "photos" && editablePhotos) {
-            onAdditionHandled()
-            gallery.launch("image/*")
-        } else if (addition == "camera" && editablePhotos) {
-            onAdditionHandled()
-            try {
-                val file = File(context.filesDir, "photos/${UUID.randomUUID()}.jpg").also { it.parentFile?.mkdirs(); it.createNewFile() }
-                pendingPath = file.absolutePath
-                camera.launch(FileProvider.getUriForFile(context, "${context.packageName}.photos", file))
-            } catch (_: Exception) { pendingPath?.let { File(it).delete() }; pendingPath = null; error = "Камера недоступна." }
-        } else if (addition == "text" && editableNote) onAdditionHandled()
-    }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        SurfaceCard(Modifier.weight(1f)) {
+            } else {
             Box(Modifier.fillMaxWidth()) {
                 Column(Modifier.fillMaxWidth()) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Фото", Modifier.weight(1.5f), fontWeight = FontWeight.Bold)
                         Text("Назва", Modifier.weight(2.6f), fontWeight = FontWeight.Bold)
                         Text("Опис", Modifier.weight(2f), fontWeight = FontWeight.Bold)
-                        Text("Статус", Modifier.weight(1.8f), fontWeight = FontWeight.Bold)
+                        if (!statusOnNextRow) Text("Статус", Modifier.weight(1.8f), fontWeight = FontWeight.Bold)
                         Spacer(Modifier.width(48.dp))
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.weight(1.5f).height(72.dp)) {
+                        Row(Modifier.weight(1.5f).height(72.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (editablePhotos) Box {
+                                IconButton(onClick = { photoSourceMenu = true },
+                                    modifier = Modifier.size(34.dp).testTag("product-photo-camera")) {
+                                    CameraGlyph()
+                                }
+                                PhotoSourceMenu(photoSourceMenu, { photoSourceMenu = false },
+                                    { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.GALLERY },
+                                    { photoSourceMenu = false; photoPickerSource = PhotoBatchSource.CAMERA })
+                            }
                             val first = block.photos.firstOrNull()
-                            if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
-                            else PhotoImage(first.path, Modifier.fillMaxSize().clickable { onPhoto(first) })
+                            val photoModifier = Modifier.weight(1f).fillMaxHeight().testTag("product-photo-preview")
+                            Box(if (first != null) photoModifier.clickable { onPhoto(first) } else photoModifier) {
+                                if (first == null) ProductPlaceholder(Modifier.fillMaxSize())
+                                else PhotoImage(first.path, Modifier.fillMaxSize(), maxDimension = 320)
+                            }
                         }
-                        if (editableInfo) OutlinedTextField(block.name, { update(currentBlock.copy(name = it)) }, modifier = Modifier.weight(2.6f).testTag("product-name").finishEditingOnOutsideTouch(), singleLine = true)
-                        else Text(block.name.ifBlank { "—" }, Modifier.weight(2.6f))
+                        if (editableInfo) OutlinedTextField(block.name, { update(currentBlock.copy(name = it)) }, modifier = Modifier.weight(2.6f).testTag(nameFieldTag).finishEditingOnOutsideTouch(), singleLine = true)
+                        else Text(block.name.ifBlank { "—" }, Modifier.weight(2.6f).testTag("product-name").semantics { disabled() })
                         if (editableInfo) OutlinedTextField(block.description, { update(currentBlock.copy(description = it)) }, modifier = Modifier.weight(2f).finishEditingOnOutsideTouch())
                         else Text(block.description.ifBlank { "—" }, Modifier.weight(2f))
-                        Box(Modifier.weight(1.8f)) {
-                            if (editableInfo) StatusPicker(block.status) { update(currentBlock.copy(status = it)) } else StatusBadge(block.status)
+                        if (!statusOnNextRow) Box(Modifier.weight(1.8f)) {
+                            if (editableInfo) StatusPicker(block.status) { update(currentBlock.copy(status = it)) }
+                            else StatusBadge(block.status)
                         }
                         Spacer(Modifier.width(48.dp))
                     }
+                    if (statusOnNextRow) {
+                        Spacer(Modifier.height(18.dp))
+                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Статус", fontWeight = FontWeight.Bold)
+                            Box(Modifier.fillMaxWidth(.64f).widthIn(min = 360.dp, max = 620.dp)) {
+                                if (editableInfo) StatusPicker(block.status) {
+                                    update(currentBlock.copy(status = it))
+                                } else StatusBadge(block.status)
+                            }
+                        }
+                    }
                 }
-                if (canEdit) TextButton(onClick = { onEdit("info") }, modifier = Modifier.align(Alignment.TopEnd).testTag("edit-product")) { Text("✎", fontSize = 24.sp) }
+                if (canEdit) IconButton(onClick = { onEdit("info") },
+                    modifier = Modifier.align(Alignment.TopEnd).testTag("edit-product")
+                        .semantics { contentDescription = "Редагувати" }) { EditActionGlyph("pen") }
             }
-        }
-        Button(onClick = onAddProduct, modifier = Modifier.testTag("add-product")) { Text("Додати виріб") }
+            }
     }
-    ProductAdditions(enabled = canAdd, activeSection = activeAddition, onAdd = onAdd)
-    if (importing) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (showAdditions) ProductAdditions(onAdd = onAdd)
     error?.let { Text(it, color = Red) }
 }
 
 @Composable
+private fun PhotoAddTile(modifier: Modifier, onClick: () -> Unit) {
+    Surface(modifier.testTag("product-photo-camera").clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp), color = Color.Transparent,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("+", color = MaterialTheme.colorScheme.outline,
+                style = MaterialTheme.typography.displaySmall)
+        }
+    }
+}
+
+@Composable
+private fun PhotoSourceMenu(expanded: Boolean, onDismiss: () -> Unit,
+    onGallery: () -> Unit, onCamera: () -> Unit) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(text = { Text("Вибрати з галереї") }, onClick = onGallery,
+            modifier = Modifier.testTag("choose-photo-gallery"))
+        DropdownMenuItem(text = { Text("Сфотографувати") }, onClick = onCamera,
+            modifier = Modifier.testTag("choose-photo-camera"))
+    }
+}
+
+@Composable
 private fun PhotoPreview(path: String, height: androidx.compose.ui.unit.Dp = 260.dp) {
-    PhotoImage(path, Modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(14.dp)).background(CanvasColor))
+    PhotoImage(path, Modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(14.dp)).background(CanvasColor), maxDimension = 800)
+}
+
+private object PhotoBitmapCache {
+    private val cache = object : android.util.LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: android.graphics.Bitmap): Int = value.byteCount
+    }
+    @Synchronized fun get(key: String): android.graphics.Bitmap? = cache.get(key)
+    @Synchronized fun put(key: String, value: android.graphics.Bitmap) { cache.put(key, value) }
 }
 
 @Composable
 internal fun PhotoImage(path: String, modifier: Modifier, maxDimension: Int = 1600, placeholder: (@Composable () -> Unit)? = null) {
-    var bitmap by remember(path) {mutableStateOf<android.graphics.Bitmap?>(null)}
-    var failed by remember(path) {mutableStateOf(false)}
+    var bitmap by remember(path, maxDimension) {mutableStateOf<android.graphics.Bitmap?>(null)}
+    var failed by remember(path, maxDimension) {mutableStateOf(false)}
     LaunchedEffect(path, maxDimension) {
-        bitmap=kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val key = "$path:$maxDimension:${File(path).lastModified()}"
+        bitmap=PhotoBitmapCache.get(key) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching {
                 val bounds=BitmapFactory.Options().apply {inJustDecodeBounds=true}
                 BitmapFactory.decodeFile(path,bounds)
@@ -779,7 +1012,7 @@ internal fun PhotoImage(path: String, modifier: Modifier, maxDimension: Int = 16
                 while(bounds.outWidth/sample>maxDimension || bounds.outHeight/sample>maxDimension) sample*=2
                 BitmapFactory.decodeFile(path,BitmapFactory.Options().apply {inSampleSize=sample})
             }.getOrNull()
-        }
+        }?.also { PhotoBitmapCache.put(key, it) }
         failed=bitmap==null
     }
     Box(modifier,contentAlignment=Alignment.Center) {
@@ -798,21 +1031,27 @@ private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (Stri
     var error by remember {mutableStateOf<String?>(null)}
     var chooseSource by remember {mutableStateOf(false)}
     fun acceptReplacement(path: String) {
-        try {
-            val bounds=BitmapFactory.Options().apply {inJustDecodeBounds=true}
-            BitmapFactory.decodeFile(path,bounds)
-            check(bounds.outWidth>0 && bounds.outHeight>0)
-            replace(path)
-            error=null
-        } catch(_: Exception) {
-            File(path).delete()
-            error="Не вдалося замінити фото. Спробуйте ще раз."
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val bounds=BitmapFactory.Options().apply {inJustDecodeBounds=true}
+                    BitmapFactory.decodeFile(path,bounds)
+                    check(bounds.outWidth>0 && bounds.outHeight>0)
+                }
+                replace(path)
+                error=null
+            } catch(_: Exception) {
+                withContext(Dispatchers.IO) { File(path).delete() }
+                error="Не вдалося замінити фото. Спробуйте ще раз."
+            } finally { busy=false }
         }
     }
     val camera=rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        pendingPath?.let {path -> if(success) acceptReplacement(path) else File(path).delete()}
+        pendingPath?.let {path ->
+            if(success) acceptReplacement(path)
+            else { scope.launch(Dispatchers.IO) { File(path).delete() }; busy=false }
+        }
         pendingPath=null
-        busy=false
     }
     val gallery=rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if(uri!=null) {
@@ -854,7 +1093,7 @@ private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (Stri
         dismissOnBackPress=!busy, dismissOnClickOutside=false
     )) {
         Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
-            PhotoImage(photo.path, Modifier.fillMaxSize(), maxDimension=3200)
+            PhotoImage(photo.path, Modifier.fillMaxSize(), maxDimension=2048)
             IconButton(onClick=onClose, enabled=!busy,
                 modifier=Modifier.align(Alignment.TopStart).padding(12.dp).background(Color.Black.copy(alpha=.7f),CircleShape)
                     .semantics {contentDescription="Закрити фото"}) {
@@ -901,25 +1140,20 @@ private fun PhotoViewer(photo: PhotoEntry, onClose: () -> Unit, onReplace: (Stri
 
 @Composable
 private fun PhotoActionGlyph(delete: Boolean) {
+    if (!delete) {
+        EditActionGlyph("pen")
+        return
+    }
     Canvas(Modifier.size(24.dp)) {
         val w=size.width
         val h=size.height
         val stroke=Stroke(width=2.dp.toPx(),cap=StrokeCap.Round)
-        if(delete) {
-            drawLine(Color.White,Offset(w*.18f,h*.25f),Offset(w*.82f,h*.25f),stroke.width,StrokeCap.Round)
-            drawLine(Color.White,Offset(w*.38f,h*.12f),Offset(w*.62f,h*.12f),stroke.width,StrokeCap.Round)
-            val outline=Path().apply {moveTo(w*.28f,h*.32f);lineTo(w*.32f,h*.85f);lineTo(w*.68f,h*.85f);lineTo(w*.72f,h*.32f)}
-            drawPath(outline,Color.White,style=stroke)
-            drawLine(Color.White,Offset(w*.43f,h*.42f),Offset(w*.44f,h*.73f),stroke.width,StrokeCap.Round)
-            drawLine(Color.White,Offset(w*.57f,h*.42f),Offset(w*.56f,h*.73f),stroke.width,StrokeCap.Round)
-        } else {
-            val pencil=Path().apply {
-                moveTo(w*.2f,h*.8f);lineTo(w*.25f,h*.59f);lineTo(w*.68f,h*.16f)
-                lineTo(w*.84f,h*.32f);lineTo(w*.41f,h*.75f);close()
-            }
-            drawPath(pencil,Color.White,style=stroke)
-            drawLine(Color.White,Offset(w*.59f,h*.25f),Offset(w*.75f,h*.41f),stroke.width,StrokeCap.Round)
-        }
+        drawLine(Color.White,Offset(w*.18f,h*.25f),Offset(w*.82f,h*.25f),stroke.width,StrokeCap.Round)
+        drawLine(Color.White,Offset(w*.38f,h*.12f),Offset(w*.62f,h*.12f),stroke.width,StrokeCap.Round)
+        val outline=Path().apply {moveTo(w*.28f,h*.32f);lineTo(w*.32f,h*.85f);lineTo(w*.68f,h*.85f);lineTo(w*.72f,h*.32f)}
+        drawPath(outline,Color.White,style=stroke)
+        drawLine(Color.White,Offset(w*.43f,h*.42f),Offset(w*.44f,h*.73f),stroke.width,StrokeCap.Round)
+        drawLine(Color.White,Offset(w*.57f,h*.42f),Offset(w*.56f,h*.73f),stroke.width,StrokeCap.Round)
     }
 }
 
