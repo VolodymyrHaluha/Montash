@@ -46,6 +46,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,8 +62,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -471,18 +474,26 @@ private fun PageHeader(title: String, subtitle: String,
 private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: () -> Unit,
     modifier: Modifier = Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Row(Modifier.widthIn(max = 540.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(value, onValueChange, modifier = Modifier.weight(1f).testTag("list-search-input"),
-                placeholder = { Text("Пошук...") }, singleLine = true,
-                shape = RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
-            Button(onClick = onApply, modifier = Modifier.height(56.dp).testTag("list-search-apply"),
+        Row(Modifier.width(220.dp).height(40.dp)) {
+            BasicTextField(value, onValueChange, singleLine = true,
+                textStyle = LocalTextStyle.current.copy(color = Ink, fontSize = 16.sp),
+                cursorBrush = SolidColor(Ink),
+                modifier = Modifier.weight(1f).fillMaxHeight()
+                    .border(1.dp, Border, RoundedCornerShape(topStart = 10.dp, bottomStart = 10.dp))
+                    .padding(horizontal = 14.dp).testTag("list-search-input"),
+                decorationBox = { input ->
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                        if (value.isEmpty()) Text("Пошук...", color = Muted)
+                        input()
+                    }
+                })
+            Button(onClick = onApply,
+                modifier = Modifier.size(width = 48.dp, height = 40.dp).testTag("list-search-apply"),
+                contentPadding = PaddingValues(0.dp),
                 shape = RoundedCornerShape(topEnd = 10.dp, bottomEnd = 10.dp)) {
-                Canvas(Modifier.size(22.dp)) {
-                    drawCircle(CanvasColor, radius = size.minDimension * .28f,
-                        center = Offset(size.width * .42f, size.height * .42f), style = Stroke(2.4.dp.toPx()))
-                    drawLine(CanvasColor, Offset(size.width * .62f, size.height * .62f),
-                        Offset(size.width * .88f, size.height * .88f), strokeWidth = 2.4.dp.toPx(), cap = StrokeCap.Round)
-                }
+                Icon(painterResource(MontashResources.drawable.ic_search),
+                    contentDescription = "Пошук", tint = CanvasColor,
+                    modifier = Modifier.size(22.dp))
             }
         }
     }
