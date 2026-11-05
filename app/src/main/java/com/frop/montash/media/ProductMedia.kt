@@ -1,6 +1,7 @@
 package com.frop.montash.media
 
 import com.frop.montash.*
+import com.frop.montash.R as MontashResources
 
 import android.Manifest
 import android.content.Intent
@@ -25,6 +26,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
@@ -45,6 +48,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
@@ -61,6 +67,10 @@ private object ThumbnailCache {
 
     @Synchronized fun get(key: String): android.graphics.Bitmap? = cache.get(key)
     @Synchronized fun put(key: String, value: android.graphics.Bitmap) { cache.put(key, value) }
+}
+
+private data class PendingDocument(val uri: Uri, val name: String, val mimeType: String) {
+    fun asMediaEntry() = MediaEntry(uri.toString(), name, mimeType, storageSection = "documents")
 }
 
 @Composable
@@ -117,6 +127,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     var seconds by remember { mutableIntStateOf(0) }
     var pendingCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
     var mediaAddMenu by remember { mutableStateOf(false) }
+    var pendingDocuments by remember { mutableStateOf<List<PendingDocument>>(emptyList()) }
+    var previewingDocument by remember { mutableStateOf<PendingDocument?>(null) }
     LaunchedEffect(busy, recorder, pendingCapturePath) {
         onBusyChange(busy || recorder != null || pendingCapturePath != null)
     }
@@ -222,7 +234,16 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
         importFiles(uris, documents = false)
     }
     val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        importFiles(uris, documents = true)
+        val selected = uris.map { uri ->
+            val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            } ?: "Документ"
+            val mime = context.contentResolver.getType(uri)
+                ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
+                ?: "application/octet-stream"
+            PendingDocument(uri, name, mime)
+        }
+        pendingDocuments = (pendingDocuments + selected).distinctBy { it.uri }
     }
     val photoCamera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         val path = pendingCapturePath
@@ -283,6 +304,25 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     }
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+    if (pendingDocuments.isNotEmpty()) DocumentSelectionDialog(
+        documents = pendingDocuments,
+        onPreview = { previewingDocument = it },
+        onAddMore = { documents.launch(arrayOf("*/*")) },
+        onCancel = { pendingDocuments = emptyList(); previewingDocument = null },
+        onConfirm = {
+            val selected = pendingDocuments.map { it.uri }
+            pendingDocuments = emptyList(); previewingDocument = null
+            importFiles(selected, documents = true)
+        })
+    previewingDocument?.let { document ->
+        MediaViewer(document.asMediaEntry(),
+            onReject = {
+                pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
+                previewingDocument = null
+            },
+            onConfirm = { previewingDocument = null },
+            onClose = { previewingDocument = null })
+    }
     if (audioPanelOpen) ProductEntryCard("Запис голосу", audioPanelOpenedAt, false, {}) {
         Text(if (recorder == null) "Натисніть «Старт», коли будете готові." else
             "Триває запис: ${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}")
@@ -439,6 +479,46 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
             .testTag("product-content-block"), content = groupsContent)
     } else Column(Modifier.fillMaxWidth(), content = groupsContent)
     viewing?.let { entry -> key(entry.id) { MediaViewer(entry) { viewing = null } } }
+}
+
+@Composable
+private fun DocumentSelectionDialog(documents: List<PendingDocument>,
+    onPreview: (PendingDocument) -> Unit, onAddMore: () -> Unit,
+    onCancel: () -> Unit, onConfirm: () -> Unit) {
+    Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize().padding(20.dp), shape = RoundedCornerShape(22.dp)) {
+            Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Вибрані документи", style = MaterialTheme.typography.titleLarge)
+                LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(documents, key = { it.uri.toString() }) { document ->
+                        Surface(Modifier.fillMaxWidth().clickable { onPreview(document) },
+                            shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                            Column(Modifier.padding(14.dp)) {
+                                Text(document.name, style = MaterialTheme.typography.bodyLarge)
+                                Text(document.mimeType, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                    item {
+                        OutlinedButton(onClick = onAddMore, modifier = Modifier.fillMaxWidth()
+                            .testTag("add-more-documents")) { Text("Додати ще файли") }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.size(width = 72.dp, height = 48.dp),
+                        contentPadding = PaddingValues(0.dp)) {
+                        Icon(painterResource(MontashResources.drawable.fa_xmark), "Скасувати")
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Button(onClick = onConfirm, modifier = Modifier.size(width = 72.dp, height = 48.dp)
+                        .testTag("confirm-documents"), contentPadding = PaddingValues(0.dp)) {
+                        Icon(painterResource(MontashResources.drawable.fa_check), "Підтвердити файли")
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
