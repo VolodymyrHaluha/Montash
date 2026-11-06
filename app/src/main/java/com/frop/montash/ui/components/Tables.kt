@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyColumn
@@ -55,35 +56,41 @@ private fun CompactSortBar(labels: List<String>, sortColumn: Int?, sortDirection
 }
 
 @Composable
-private fun TableLayout(headers: List<Pair<String, Float>>, modifier: Modifier,
-    sortColumn: Int?, sortDirection: SortDirection?, onSort: (Int) -> Unit,
-    rows: LazyListScope.() -> Unit) {
-    Column(modifier) {
-        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
-            headers.forEachIndexed { index, (title, weight) ->
-                val direction = if (sortColumn == index) sortDirection else null
-                Row(Modifier.weight(weight).clickable { onSort(index) }
-                    .semantics { contentDescription = "$title: " + when (direction) {
-                        SortDirection.DESCENDING -> "від найбільшого до найменшого"
-                        SortDirection.ASCENDING -> "від найменшого до найбільшого"
-                        null -> "без сортування"
-                    } }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
-                    if (direction != null) {
-                        Spacer(Modifier.width(5.dp))
-                        val color = MaterialTheme.colorScheme.primary
-                        Canvas(Modifier.size(12.dp)) {
-                            val top = if (direction == SortDirection.ASCENDING) .7f else .3f
-                            val tip = if (direction == SortDirection.ASCENDING) .3f else .7f
-                            drawLine(color, Offset(size.width * .15f, size.height * top),
-                                Offset(size.width * .5f, size.height * tip), 2.dp.toPx(), cap = StrokeCap.Round)
-                            drawLine(color, Offset(size.width * .5f, size.height * tip),
-                                Offset(size.width * .85f, size.height * top), 2.dp.toPx(), cap = StrokeCap.Round)
-                        }
+private fun SortableTableHeader(headers: List<Pair<String, Float>>, sortColumn: Int?,
+    sortDirection: SortDirection?, onSort: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
+        headers.forEachIndexed { index, (title, weight) ->
+            val direction = if (sortColumn == index) sortDirection else null
+            Row(Modifier.weight(weight).clickable { onSort(index) }
+                .semantics { contentDescription = "$title: " + when (direction) {
+                    SortDirection.DESCENDING -> "від найбільшого до найменшого"
+                    SortDirection.ASCENDING -> "від найменшого до найбільшого"
+                    null -> "без сортування"
+                } }.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+                if (direction != null) {
+                    Spacer(Modifier.width(5.dp))
+                    val color = MaterialTheme.colorScheme.primary
+                    Canvas(Modifier.size(12.dp)) {
+                        val top = if (direction == SortDirection.ASCENDING) .7f else .3f
+                        val tip = if (direction == SortDirection.ASCENDING) .3f else .7f
+                        drawLine(color, Offset(size.width * .15f, size.height * top),
+                            Offset(size.width * .5f, size.height * tip), 2.dp.toPx(), cap = StrokeCap.Round)
+                        drawLine(color, Offset(size.width * .5f, size.height * tip),
+                            Offset(size.width * .85f, size.height * top), 2.dp.toPx(), cap = StrokeCap.Round)
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TableLayout(headers: List<Pair<String, Float>>, modifier: Modifier,
+    sortColumn: Int?, sortDirection: SortDirection?, onSort: (Int) -> Unit,
+    rows: LazyListScope.() -> Unit) {
+    Column(modifier) {
+        SortableTableHeader(headers, sortColumn, sortDirection, onSort)
         LazyColumn(Modifier.fillMaxWidth().weight(1f), content = rows)
     }
 }
@@ -107,7 +114,30 @@ internal fun StatusBadge(status: WorkStatus) {
 
 @Composable
 internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, fillWidth: Boolean = true,
-    onChange: (WorkStatus) -> Unit) {
+    vertical: Boolean = false, onChange: (WorkStatus) -> Unit) {
+    if (vertical) {
+        Column(Modifier.fillMaxWidth().testTag("product-status"),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            WorkStatus.entries.forEach { value ->
+                val selected = status == value
+                val activeColors = value.tagColors()
+                Surface(Modifier.fillMaxWidth().height(44.dp)
+                    .testTag("status-${value.name.lowercase()}")
+                    .clickable(enabled = enabled) { onChange(value) },
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (selected) activeColors.background else Color(0xFF46514C),
+                    border = BorderStroke(1.dp,
+                        if (selected) activeColors.border else Color(0xFF75817B))) {
+                    Box(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 11.dp),
+                        contentAlignment = Alignment.Center) {
+                        Text(value.label, color = Color.White,
+                            style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    }
+                }
+            }
+        }
+        return
+    }
     val rowModifier = if (fillWidth) Modifier.fillMaxWidth() else Modifier.wrapContentWidth()
     Row(rowModifier.height(44.dp).testTag("product-status"),
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -367,6 +397,8 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
     )) {
         SurfaceCard(Modifier.fillMaxSize().systemBarsPadding().padding(12.dp)
             .testTag("object-edit-dialog")) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .testTag("object-editor-scroll")) {
             if (compact) {
                 Column(Modifier.fillMaxWidth()) {
                     Text("Редагування об'єкта", style = MaterialTheme.typography.headlineSmall,
@@ -430,16 +462,15 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
             Spacer(Modifier.height(16.dp))
             Text("Вироби", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
-            if (compact) Column(Modifier.fillMaxWidth().weight(1f)
+            if (compact) Column(Modifier.fillMaxWidth()
                 .testTag("object-products-editor")) {
                 CompactSortBar(listOf("Фото", "Назва", "Опис", "Статус"),
                     sortColumn, sortDirection, ::changeSort)
-                LazyColumn(Modifier.fillMaxWidth().weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (sortedProducts.isEmpty()) item {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (sortedProducts.isEmpty()) {
                         Text("Виробів поки немає", Modifier.padding(20.dp))
                     }
-                    items(sortedProducts, key = { it.id }) { product ->
+                    sortedProducts.forEach { product ->
                         Surface(Modifier.fillMaxWidth().testTag("object-editor-product-${product.id}"),
                             shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface,
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
@@ -486,13 +517,13 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
                         }
                     }
                 }
-            } else TableLayout(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f,
-                "Опис" to 2f, "Статус" to 1.8f), Modifier.fillMaxWidth().weight(1f)
-                .testTag("object-products-editor"), sortColumn, sortDirection, ::changeSort) {
-                if (sortedProducts.isEmpty()) item {
+            } else Column(Modifier.fillMaxWidth().testTag("object-products-editor")) {
+                SortableTableHeader(listOf("Фото виробу" to 1.5f, "Назва" to 2.6f,
+                    "Опис" to 2f, "Статус" to 1.8f), sortColumn, sortDirection, ::changeSort)
+                if (sortedProducts.isEmpty()) {
                     Text("Виробів поки немає", Modifier.padding(20.dp))
                 }
-                items(sortedProducts, key = { it.id }) { product ->
+                sortedProducts.forEach { product ->
                     Row(Modifier.fillMaxWidth().testTag("object-editor-product-${product.id}")
                         .padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.weight(1.5f).padding(8.dp)) {
@@ -527,13 +558,14 @@ internal fun ObjectEditDialog(project: Project, onClose: () -> Unit, onDelete: (
                             .testTag("object-product-description-${product.id}"), minLines = 1, maxLines = 3)
                         Box(Modifier.weight(1.8f).padding(8.dp)
                             .testTag("object-product-status-${product.id}")) {
-                            StatusPicker(product.status) { status ->
+                            StatusPicker(product.status, vertical = true) { status ->
                                 updateProduct(product.id) { it.copy(status = status) }
                             }
                         }
                     }
                     HorizontalDivider()
                 }
+            }
             }
         }
     }
