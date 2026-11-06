@@ -10,7 +10,6 @@ import android.net.NetworkCapabilities
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
-import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,11 +23,51 @@ internal enum class ServerConnection(val label: String) {
     NOT_CONFIGURED("Сервер не налаштовано")
 }
 
+/**
+ * Prevents a single short Cloudflare/origin restart from making the UI flap
+ * between connected and unavailable. Real network loss is still reported
+ * immediately; only a reachable network with a temporarily failing server is
+ * debounced.
+ */
+internal class ConnectionStateStabilizer(
+    private val unavailableThreshold: Int = 3
+) {
+    init {
+        require(unavailableThreshold > 0)
+    }
+
+    private var lastHealthy: ServerConnection? = null
+    private var consecutiveUnavailable = 0
+
+    fun update(observed: ServerConnection): ServerConnection = when (observed) {
+        ServerConnection.LOCAL, ServerConnection.GLOBAL -> {
+            lastHealthy = observed
+            consecutiveUnavailable = 0
+            observed
+        }
+        ServerConnection.SERVER_UNAVAILABLE -> {
+            consecutiveUnavailable++
+            if (consecutiveUnavailable >= unavailableThreshold) {
+                ServerConnection.SERVER_UNAVAILABLE
+            } else {
+                lastHealthy ?: ServerConnection.CHECKING
+            }
+        }
+        else -> {
+            consecutiveUnavailable = 0
+            lastHealthy = null
+            observed
+        }
+    }
+}
+
 internal class ServerConnectionMonitor(private val context: Context, private val remote: RemoteProjects) {
     private val localSsid = BuildConfig.MONTASH_LOCAL_WIFI_SSID.trim()
-    private var lastGlobalSuccessAt = 0L
+    private val stabilizer = ConnectionStateStabilizer()
 
-    suspend fun check(): ServerConnection = withContext(Dispatchers.IO) {
+    suspend fun check(): ServerConnection = stabilizer.update(checkRaw())
+
+    private suspend fun checkRaw(): ServerConnection = withContext(Dispatchers.IO) {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         val network = connectivity.activeNetwork ?: return@withContext ServerConnection.OFFLINE
         val capabilities = connectivity.getNetworkCapabilities(network)
@@ -45,18 +84,10 @@ internal class ServerConnectionMonitor(private val context: Context, private val
         val onLocalWifi = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
             localSsid.isNotEmpty() && currentSsid(capabilities) == localSsid
         if (onLocalWifi && remote.localHealthy()) {
-            lastGlobalSuccessAt = 0L
             return@withContext ServerConnection.LOCAL
         }
-        val result = if (remote.globalHealthy()) {
-            lastGlobalSuccessAt = SystemClock.elapsedRealtime()
-            ServerConnection.GLOBAL
-        } else if (lastGlobalSuccessAt != 0L && SystemClock.elapsedRealtime() - lastGlobalSuccessAt < 15_000) {
-            ServerConnection.GLOBAL
-        } else {
-            ServerConnection.SERVER_UNAVAILABLE
-        }
-        result
+        if (remote.globalHealthy()) ServerConnection.GLOBAL
+        else ServerConnection.SERVER_UNAVAILABLE
     }
 
     private fun currentSsid(capabilities: NetworkCapabilities): String? {

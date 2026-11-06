@@ -31,12 +31,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import org.json.JSONObject
 
-private class RichTextBridge(private val onChanged: (String) -> Unit) {
+private class RichTextBridge(private val onChanged: (String) -> Unit,
+    private val onStyleChanged: (String) -> Unit) {
     private val main = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
     fun changed(html: String) {
         main.post { onChanged(html) }
+    }
+
+    @JavascriptInterface
+    fun styleChanged(styles: String) {
+        main.post { onStyleChanged(styles) }
     }
 }
 
@@ -46,14 +52,20 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
     val context = LocalContext.current
     val initialValue = remember { value }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var activeStyles by remember { mutableStateOf<Set<String>>(emptySet()) }
     val latestChange by rememberUpdatedState(onValueChange)
-    val bridge = remember { RichTextBridge { latestChange(it) } }
+    val bridge = remember {
+        RichTextBridge({ latestChange(it) }) { styles ->
+            activeStyles = styles.split(',').filterTo(mutableSetOf()) { it.isNotBlank() }
+        }
+    }
 
     fun command(name: String, argument: String? = null) {
         val arg = argument?.let(JSONObject::quote) ?: "null"
         webView?.evaluateJavascript(
             "document.getElementById('editor').focus();document.execCommand(${JSONObject.quote(name)},false,$arg);" +
-                "window.MontashText.changed(document.getElementById('editor').innerHTML);", null)
+                "window.MontashText.changed(document.getElementById('editor').innerHTML);" +
+                "window.reportToolbarState();", null)
     }
 
     Surface(modifier.semantics {
@@ -79,18 +91,18 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
         Column {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
                 .testTag("rich-text-toolbar")) {
-                RichTextTool("H1") { command("formatBlock", "H1") }
-                RichTextTool("H2") { command("formatBlock", "H2") }
-                RichTextTool("P") { command("formatBlock", "P") }
-                RichTextTool("B") { command("bold") }
-                RichTextTool("I") { command("italic") }
-                RichTextTool("U") { command("underline") }
-                RichTextTool("• список") { command("insertUnorderedList") }
-                RichTextTool("1. список") { command("insertOrderedList") }
-                RichTextTool("←") { command("justifyLeft") }
-                RichTextTool("↔") { command("justifyCenter") }
-                RichTextTool("→") { command("justifyRight") }
-                RichTextTool("Очистити") { command("removeFormat") }
+                RichTextTool("H1", "h1" in activeStyles) { command("formatBlock", "H1") }
+                RichTextTool("H2", "h2" in activeStyles) { command("formatBlock", "H2") }
+                RichTextTool("P", "p" in activeStyles) { command("formatBlock", "P") }
+                RichTextTool("B", "bold" in activeStyles) { command("bold") }
+                RichTextTool("I", "italic" in activeStyles) { command("italic") }
+                RichTextTool("U", "underline" in activeStyles) { command("underline") }
+                RichTextTool("• список", "unordered" in activeStyles) { command("insertUnorderedList") }
+                RichTextTool("1. список", "ordered" in activeStyles) { command("insertOrderedList") }
+                RichTextTool("←", "left" in activeStyles) { command("justifyLeft") }
+                RichTextTool("↔", "center" in activeStyles) { command("justifyCenter") }
+                RichTextTool("→", "right" in activeStyles) { command("justifyRight") }
+                RichTextTool("Очистити", false) { command("removeFormat") }
             }
             HorizontalDivider()
             AndroidView(factory = {
@@ -112,7 +124,33 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
                         </style></head><body><div id="editor" contenteditable="true"></div>
                         <script>
                           const editor=document.getElementById('editor'); editor.innerHTML=$content;
-                          editor.addEventListener('input',()=>window.MontashText.changed(editor.innerHTML));
+                          window.reportToolbarState=()=>{
+                            const styles=[];
+                            const block=(document.queryCommandValue('formatBlock')||'')
+                              .toLowerCase().replace(/[<>]/g,'');
+                            if(block==='h1'||block==='h2'||block==='p') styles.push(block);
+                            if(document.queryCommandState('bold')) styles.push('bold');
+                            if(document.queryCommandState('italic')) styles.push('italic');
+                            if(document.queryCommandState('underline')) styles.push('underline');
+                            if(document.queryCommandState('insertUnorderedList')) styles.push('unordered');
+                            if(document.queryCommandState('insertOrderedList')) styles.push('ordered');
+                            if(document.queryCommandState('justifyCenter')) styles.push('center');
+                            else if(document.queryCommandState('justifyRight')) styles.push('right');
+                            else styles.push('left');
+                            window.MontashText.styleChanged(styles.join(','));
+                          };
+                          editor.addEventListener('input',()=>{
+                            window.MontashText.changed(editor.innerHTML);
+                            window.reportToolbarState();
+                          });
+                          ['focus','keyup','mouseup'].forEach(event=>
+                            editor.addEventListener(event,window.reportToolbarState));
+                          document.addEventListener('selectionchange',()=>{
+                            const selection=window.getSelection();
+                            if(selection&&selection.anchorNode&&editor.contains(selection.anchorNode))
+                              window.reportToolbarState();
+                          });
+                          setTimeout(window.reportToolbarState,0);
                         </script></body></html>
                     """.trimIndent(), "text/html", "UTF-8", null)
                     webView = this
@@ -130,10 +168,15 @@ internal fun RichTextEditor(value: String, onValueChange: (String) -> Unit, modi
 }
 
 @Composable
-private fun RichTextTool(label: String, onClick: () -> Unit) {
-    Box(Modifier.height(48.dp).clickable(onClick = onClick).padding(horizontal = 14.dp),
-        contentAlignment = Alignment.Center) {
-        Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+private fun RichTextTool(label: String, active: Boolean, onClick: () -> Unit) {
+    Surface(Modifier.height(48.dp).padding(4.dp).clickable(onClick = onClick)
+        .testTag("rich-text-tool-${label.lowercase()}"),
+        shape = RoundedCornerShape(8.dp),
+        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+        contentColor = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface) {
+        Box(Modifier.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
+            Text(label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+        }
     }
 }
 

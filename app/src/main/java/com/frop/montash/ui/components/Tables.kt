@@ -131,7 +131,8 @@ internal fun StatusPicker(status: WorkStatus, enabled: Boolean = true, fillWidth
     }
 }
 @Composable
-internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit,
+    modifier: Modifier = Modifier, query: String = "", compactTable: Boolean = false) {
     val compact = isCompactLayout()
     var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
     var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
@@ -157,7 +158,7 @@ internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, mo
             filteredProjects.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
         }
     }
-    if (compact) {
+    if (compact && !compactTable) {
         Column(modifier.testTag("objects-table")) {
             CompactSortBar(listOf("Назва", "Опис", "Кількість", "Статус"),
                 sortColumn, sortDirection, ::changeSort)
@@ -200,7 +201,8 @@ internal fun ObjectsTable(projects: List<Project>, onOpen: (Project) -> Unit, mo
     }
 }
 @Composable
-internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock) -> Unit, modifier: Modifier = Modifier, query: String = "") {
+internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock) -> Unit,
+    modifier: Modifier = Modifier, query: String = "", compactTable: Boolean = false) {
     val compact = isCompactLayout()
     var sortColumn by rememberSaveable { mutableStateOf<Int?>(null) }
     var sortDirection by rememberSaveable { mutableStateOf<SortDirection?>(null) }
@@ -226,7 +228,7 @@ internal fun ProductsTable(projects: List<Project>, onOpen: (Project, WorkBlock)
             filteredProducts.sortedWith(if (sortDirection == SortDirection.DESCENDING) comparator.reversed() else comparator)
         }
     }
-    if (compact) {
+    if (compact && !compactTable) {
         Column(modifier.testTag("object-products")) {
             CompactSortBar(listOf("Фото", "Назва", "Опис", "Статус"),
                 sortColumn, sortDirection, ::changeSort)

@@ -39,8 +39,12 @@ internal class RemoteProjects(
         if (endpoint.isEmpty()) return@withContext false
         try {
             val connection = (URL("$endpoint/api/montash/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
                 connectTimeout = timeoutMs
                 readTimeout = timeoutMs
+                useCaches = false
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Cache-Control", "no-cache")
                 setRequestProperty("Authorization", "Bearer $token")
             }
             try {

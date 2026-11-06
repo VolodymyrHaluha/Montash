@@ -14,7 +14,6 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
@@ -67,6 +66,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -180,7 +180,7 @@ internal fun MontashApp() {
     LaunchedEffect(monitor, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var firstCheck = true
-            ConnectionPolling(SystemClock::elapsedRealtime, ::delay).run {
+            ConnectionPolling(SystemClock::elapsedRealtime, ::delay, intervalMs = 5_000L).run {
                 val current = monitor.check()
                 val previous = serverConnection
                 if (current != previous) {
@@ -245,7 +245,7 @@ internal fun MontashApp() {
     }
     var screen by rememberSaveable { mutableStateOf(Screen.OBJECTS) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
-    var initialProductId by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedProductId = rememberSaveable { mutableStateOf<String?>(null) }
     var objectReturnScreen by rememberSaveable { mutableStateOf(Screen.OBJECTS) }
     var detailBackSignal by remember { mutableIntStateOf(0) }
     var photoSelection by rememberSaveable { mutableStateOf<List<String>?>(null) }
@@ -269,7 +269,7 @@ internal fun MontashApp() {
         }
         projects = updated
         selectedId = null
-        initialProductId = null
+        selectedProductId.value = null
         screen = Screen.OBJECTS
         val retainedFiles = updated.flatMap { project -> project.blocks.flatMap { block ->
             block.photos.map { it.path } + block.media.map { it.path }
@@ -281,11 +281,13 @@ internal fun MontashApp() {
     }
     fun open(project: Project) {
         if (!navigationTapGate.tryEnter()) return
-        selectedId = project.id; initialProductId = null; objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL
+        selectedId = project.id; selectedProductId.value = null
+        objectReturnScreen = Screen.OBJECTS; screen = Screen.OBJECT_DETAIL
     }
     fun openProduct(project: Project, product: WorkBlock) {
         if (!navigationTapGate.tryEnter()) return
-        selectedId = project.id; initialProductId = product.id; objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL
+        selectedId = project.id; selectedProductId.value = product.id
+        objectReturnScreen = Screen.PRODUCTS; screen = Screen.OBJECT_DETAIL
     }
     fun openPhoto(project: Project, block: WorkBlock, photo: PhotoEntry) {
         photoSelection = listOf(project.id, block.id, photo.id)
@@ -329,16 +331,21 @@ internal fun MontashApp() {
                     var appliedSearch by rememberSaveable { mutableStateOf("") }
                     PageHeader("Вироби", "Всього: ${projects.sumOf { it.blocks.size }}",
                         search = { ListSearch(searchText, { searchText = it },
-                            { appliedSearch = searchText.trim() }) })
+                            { appliedSearch = searchText.trim() },
+                            alignment = if (compact) Alignment.CenterStart else Alignment.Center) })
                     Spacer(Modifier.height(16.dp))
-                    ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
+                    ProductsTable(projects, ::openProduct, Modifier.weight(1f).fillMaxWidth(),
+                        appliedSearch, compactTable = compact)
                 }
             }
             Screen.OBJECT_DETAIL -> projects.find { it.id == selectedId }?.let { project ->
                 key(project.id) {
                     ObjectDetail(project, { screen = objectReturnScreen },
                         { block, photo -> openPhoto(project, block, photo) }, ::update,
-                        initialProductId, detailBackSignal, navigationTapGate::tryEnter,
+                        initialProductId = selectedProductId.value,
+                        selectedProductId = selectedProductId,
+                        backSignal = detailBackSignal,
+                        canOpenProduct = navigationTapGate::tryEnter,
                         onDeleteProject = { target ->
                             scope.launch {
                                 try { deleteProject(target) }
@@ -364,7 +371,8 @@ internal fun MontashApp() {
             }
         } else {
             Row(Modifier.fillMaxSize()) {
-                NavigationRail(screen, { screen = it }, onBack = { detailBackSignal++ })
+                NavigationRail(screen, { screen = it }, onBack = { detailBackSignal++ },
+                    connection = serverConnection)
                 AnimatedContent(targetState = screen, label = "screen",
                     modifier = Modifier.weight(1f)) { ScreenContent(it) }
             }
@@ -404,7 +412,8 @@ private fun CompactNavigationBar(active: Screen, onSelect: (Screen) -> Unit, onB
 }
 
 @Composable
-private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit, onBack: () -> Unit) {
+private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit, onBack: () -> Unit,
+    connection: ServerConnection) {
     val items = listOf(Screen.OBJECTS to "Об'єкти", Screen.PRODUCTS to "Вироби")
     Column(
         Modifier.width(116.dp).fillMaxHeight().background(Surface).padding(vertical = 24.dp),
@@ -434,6 +443,22 @@ private fun NavigationRail(active: Screen, onSelect: (Screen) -> Unit, onBack: (
             }
             Spacer(Modifier.height(8.dp))
         }
+        if (active != Screen.OBJECT_DETAIL) Spacer(Modifier.weight(1f))
+        val connected = connection == ServerConnection.LOCAL || connection == ServerConnection.GLOBAL
+        val statusColor = when (connection) {
+            ServerConnection.LOCAL, ServerConnection.GLOBAL -> Teal
+            ServerConnection.CHECKING -> Color(0xFFE0AC53)
+            else -> Red
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+            .testTag("server-connection-status"),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(statusColor))
+            Spacer(Modifier.height(5.dp))
+            Text(connection.label, color = statusColor, fontSize = 9.sp,
+                lineHeight = 11.sp, textAlign = TextAlign.Center,
+                fontWeight = if (connected) FontWeight.SemiBold else FontWeight.Normal)
+        }
     }
     Box(Modifier.width(1.dp).fillMaxHeight().background(Border))
 }
@@ -457,8 +482,12 @@ private fun PageHeader(title: String, subtitle: String,
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Column { Text(title, fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Ink)
                 Spacer(Modifier.height(3.dp)); Text(subtitle, color = Muted, fontSize = 13.sp) }
-            search?.invoke()
-            if (action != null) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) { action() }
+            if (search != null || action != null) Row(Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                if (search != null) Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) { search() }
+                action?.invoke()
+            }
         }
     } else {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -472,8 +501,8 @@ private fun PageHeader(title: String, subtitle: String,
 
 @Composable
 private fun ListSearch(value: String, onValueChange: (String) -> Unit, onApply: () -> Unit,
-    modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+    modifier: Modifier = Modifier, alignment: Alignment = Alignment.Center) {
+    Box(modifier.fillMaxWidth(), contentAlignment = alignment) {
         Row(Modifier.width(220.dp).height(40.dp)) {
             BasicTextField(value, onValueChange, singleLine = true,
                 textStyle = LocalTextStyle.current.copy(color = Ink, fontSize = 16.sp),
@@ -516,13 +545,15 @@ private fun ObjectsScreen(projects: List<Project>, onAddClient: (String) -> Clie
     )) {
         PageHeader("Об'єкти", "Всього: ${projects.size}",
             search = { ListSearch(searchText, { searchText = it },
-                { appliedSearch = searchText.trim() }) },
+                { appliedSearch = searchText.trim() },
+                alignment = if (compact) Alignment.CenterStart else Alignment.Center) },
             action = {
                 Button(onClick={ objectName="";objectDescription="";creating=true }) { Text("Створити об'єкт") }
             })
         Spacer(Modifier.height(16.dp))
         if (projects.isEmpty()) Text("Створіть перший об'єкт: вкажіть його назву.", color=Muted)
-        ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth(), appliedSearch)
+        ObjectsTable(projects, onProject, Modifier.weight(1f).fillMaxWidth(), appliedSearch,
+            compactTable = compact)
     }
     if (creating) AlertDialog(
         modifier=Modifier.dismissInputOnOutsideTouch(),
@@ -545,12 +576,16 @@ private fun ObjectsScreen(projects: List<Project>, onAddClient: (String) -> Clie
 @Composable
 internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBlock, PhotoEntry) -> Unit,
     onUpdate: suspend (Project, Project) -> Unit,
-    initialProductId: String? = null, backSignal: Int = 0,
+    initialProductId: String? = null,
+    selectedProductId: MutableState<String?>? = null,
+    backSignal: Int = 0,
     canOpenProduct: () -> Boolean = { true }, onDeleteProject: (Project) -> Unit = {}) {
     val compact = isCompactLayout()
     val scope = rememberCoroutineScope()
     var saving by remember { mutableStateOf(false) }
-    var productId by rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
+    val localProductId = rememberSaveable(project.id, initialProductId) { mutableStateOf(initialProductId) }
+    val productIdState = selectedProductId ?: localProductId
+    var productId by productIdState
     var draft by remember(project.id) { mutableStateOf<WorkBlock?>(null) }
     var activeEdit by remember(project.id) { mutableStateOf<Pair<String, String?>?>(null) }
     var editBusy by remember(project.id) { mutableStateOf(false) }
@@ -656,10 +691,25 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
             }
             if (compact) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 title()
-                ListSearch(productSearchText, { productSearchText = it },
-                    { appliedProductSearch = productSearchText.trim() })
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically) { actions() }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    ListSearch(productSearchText, { productSearchText = it },
+                        { appliedProductSearch = productSearchText.trim() }, Modifier.weight(1f),
+                        alignment = Alignment.CenterStart)
+                    TextButton(onClick = { editingObject = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text("Редагувати об’єкт", fontSize = 13.sp, maxLines = 1)
+                    }
+                    Button(onClick = {
+                        if (draft != null) cancelProduct()
+                        draft = WorkBlock()
+                        creating = true
+                        error = null
+                    }, modifier = Modifier.testTag("add-product"),
+                        contentPadding = PaddingValues(horizontal = 10.dp)) {
+                        Text("Додати виріб", fontSize = 13.sp, maxLines = 1)
+                    }
+                }
             } else Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { title() }
                 ListSearch(productSearchText, { productSearchText = it },
@@ -673,7 +723,7 @@ internal fun ObjectDetail(project: Project, onBack: () -> Unit, onPhoto: (WorkBl
         if (product == null) {
             if (project.blocks.isEmpty()) Text("Додайте перший виріб до об'єкта.", color = Muted)
             ProductsTable(listOf(project), { _, block -> if (canOpenProduct()) productId = block.id },
-                Modifier.weight(1f).fillMaxWidth(), appliedProductSearch)
+                Modifier.weight(1f).fillMaxWidth(), appliedProductSearch, compactTable = compact)
         } else key(product.id) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
@@ -831,48 +881,64 @@ internal fun ProductPlaceholder(modifier: Modifier = Modifier) {
         contentScale = ContentScale.Fit, modifier = modifier.padding(24.dp))
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ProductAdditions(onAdd: (String) -> Unit) {
     val compact = isCompactLayout()
     var mediaMenu by remember { mutableStateOf(false) }
     val kinds = listOf("photos" to "Фото", "media" to "Медіа", "audio" to "Аудіо",
         "text" to "Текст", "documents" to "Документи")
+
+    @Composable fun AdditionButton(section: String, label: String, modifier: Modifier) {
+        Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+            if (section == "photos") {
+                OutlinedButton(onClick = { onAdd("photos") },
+                    modifier = Modifier.weight(1f).testTag("add-photo-camera"),
+                    contentPadding = PaddingValues(horizontal = 4.dp)) {
+                    Text(label, maxLines = 1, fontSize = 13.sp)
+                    Spacer(Modifier.width(5.dp))
+                    CameraGlyph()
+                }
+            } else {
+                Box(Modifier.weight(1f)) {
+                    OutlinedButton(onClick = {
+                        if (section == "media") mediaMenu = true else onAdd(section)
+                    }, modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 4.dp)) {
+                        Text(label, maxLines = 1, fontSize = 13.sp)
+                        Spacer(Modifier.width(5.dp))
+                        ProductActionIcon(section)
+                    }
+                    if (section == "media") DropdownMenu(mediaMenu, { mediaMenu = false }) {
+                        DropdownMenuItem(text = { Text("Галерея телефона") }, onClick = {
+                            mediaMenu = false; onAdd("media-gallery")
+                        })
+                        DropdownMenuItem(text = { Text("Сфотографувати") }, onClick = {
+                            mediaMenu = false; onAdd("media-photo")
+                        })
+                        DropdownMenuItem(text = { Text("Зняти відео") }, onClick = {
+                            mediaMenu = false; onAdd("media-video")
+                        })
+                    }
+                }
+            }
+        }
+    }
+
     SurfaceCard(Modifier.fillMaxWidth().testTag("product-additions")) {
         Text("Додати нові дані", fontWeight = FontWeight.Bold, fontSize = 17.sp)
         Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth().then(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            kinds.forEach { (section, label) ->
-                Row(if (compact) Modifier.width(126.dp) else Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (section == "photos") {
-                        OutlinedButton(onClick = { onAdd("photos") }, modifier = Modifier.weight(1f).testTag("add-photo-camera"),
-                            contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text(label, maxLines = 1, fontSize = 13.sp)
-                            Spacer(Modifier.width(5.dp))
-                            CameraGlyph()
-                        }
-                    } else {
-                    Box(Modifier.weight(1f)) {
-                        OutlinedButton(onClick = {
-                            when (section) {
-                                "media" -> mediaMenu = true
-                                else -> onAdd(section)
-                            }
-                        },
-                            modifier = Modifier.fillMaxWidth(),
-                            contentPadding = PaddingValues(horizontal = 4.dp)) {
-                            Text(label, maxLines = 1, fontSize = 13.sp)
-                            Spacer(Modifier.width(5.dp))
-                            ProductActionIcon(section)
-                        }
-                        if (section == "media") DropdownMenu(mediaMenu, { mediaMenu = false }) {
-                            DropdownMenuItem(text = { Text("Галерея телефона") }, onClick = { mediaMenu = false; onAdd("media-gallery") })
-                            DropdownMenuItem(text = { Text("Сфотографувати") }, onClick = { mediaMenu = false; onAdd("media-photo") })
-                            DropdownMenuItem(text = { Text("Зняти відео") }, onClick = { mediaMenu = false; onAdd("media-video") })
-                        }
-                    }
-                    }
+        if (compact) {
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                kinds.forEach { (section, label) ->
+                    AdditionButton(section, label, Modifier.width(126.dp))
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                kinds.forEach { (section, label) ->
+                    AdditionButton(section, label, Modifier.weight(1f))
                 }
             }
         }

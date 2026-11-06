@@ -307,6 +307,10 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
     if (pendingDocuments.isNotEmpty()) DocumentSelectionDialog(
         documents = pendingDocuments,
         onPreview = { previewingDocument = it },
+        onRemove = { document ->
+            pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
+            if (previewingDocument?.uri == document.uri) previewingDocument = null
+        },
         onAddMore = { documents.launch(arrayOf("*/*")) },
         onCancel = { pendingDocuments = emptyList(); previewingDocument = null },
         onConfirm = {
@@ -315,13 +319,7 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
             importFiles(selected, documents = true)
         })
     previewingDocument?.let { document ->
-        MediaViewer(document.asMediaEntry(),
-            onReject = {
-                pendingDocuments = pendingDocuments.filterNot { it.uri == document.uri }
-                previewingDocument = null
-            },
-            onConfirm = { previewingDocument = null },
-            onClose = { previewingDocument = null })
+        MediaViewer(document.asMediaEntry()) { previewingDocument = null }
     }
     if (audioPanelOpen) ProductEntryCard("Запис голосу", audioPanelOpenedAt, false, {}) {
         Text(if (recorder == null) "Натисніть «Старт», коли будете готові." else
@@ -483,7 +481,8 @@ internal fun ProductMedia(block: WorkBlock, onUpdate: (WorkBlock) -> Unit, onPho
 
 @Composable
 private fun DocumentSelectionDialog(documents: List<PendingDocument>,
-    onPreview: (PendingDocument) -> Unit, onAddMore: () -> Unit,
+    onPreview: (PendingDocument) -> Unit, onRemove: (PendingDocument) -> Unit,
+    onAddMore: () -> Unit,
     onCancel: () -> Unit, onConfirm: () -> Unit) {
     Dialog(onDismissRequest = onCancel, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().padding(20.dp), shape = RoundedCornerShape(22.dp)) {
@@ -491,11 +490,19 @@ private fun DocumentSelectionDialog(documents: List<PendingDocument>,
                 Text("Вибрані документи", style = MaterialTheme.typography.titleLarge)
                 LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(documents, key = { it.uri.toString() }) { document ->
-                        Surface(Modifier.fillMaxWidth().clickable { onPreview(document) },
+                        Surface(Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
-                            Column(Modifier.padding(14.dp)) {
-                                Text(document.name, style = MaterialTheme.typography.bodyLarge)
-                                Text(document.mimeType, style = MaterialTheme.typography.bodySmall)
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f).clickable { onPreview(document) }.padding(14.dp)) {
+                                    Text(document.name, style = MaterialTheme.typography.bodyLarge)
+                                    Text(document.mimeType, style = MaterialTheme.typography.bodySmall)
+                                }
+                                IconButton(onClick = { onRemove(document) },
+                                    modifier = Modifier.testTag("remove-document-${document.uri}")) {
+                                    Icon(painterResource(MontashResources.drawable.fa_trash),
+                                        contentDescription = "Видалити ${document.name}")
+                                }
+                                Spacer(Modifier.width(8.dp))
                             }
                         }
                     }

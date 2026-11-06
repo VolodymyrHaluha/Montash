@@ -3,7 +3,6 @@
 package com.frop.montash.media
 
 import com.frop.montash.*
-import com.frop.montash.R as MontashResources
 
 import android.content.Context
 import android.graphics.Canvas
@@ -26,7 +25,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -61,8 +59,7 @@ private sealed interface LoadedImage {
 }
 
 @Composable
-internal fun MediaViewer(entry: MediaEntry, onReject: (() -> Unit)? = null,
-    onConfirm: (() -> Unit)? = null, onClose: () -> Unit) {
+internal fun MediaViewer(entry: MediaEntry, onClose: () -> Unit) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var error by remember { mutableStateOf<String?>(null) }
@@ -132,13 +129,7 @@ internal fun MediaViewer(entry: MediaEntry, onReject: (() -> Unit)? = null,
             Column(Modifier.fillMaxSize().padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row {
                     Text(entry.name, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    if (onReject != null) IconButton(onClick = onReject) {
-                        Icon(painterResource(MontashResources.drawable.fa_xmark), "Скасувати вибір")
-                    }
-                    if (onConfirm != null) IconButton(onClick = onConfirm) {
-                        Icon(painterResource(MontashResources.drawable.fa_check), "Підтвердити вибір")
-                    }
-                    if (onReject == null && onConfirm == null) TextButton(onClick = onClose) { Text("Закрити") }
+                    TextButton(onClick = onClose) { Text("Закрити") }
                 }
                 if (contentUri == null && !File(entry.path).isFile) Text("Файл відсутній на пристрої.", color = MaterialTheme.colorScheme.error)
                 else when {
